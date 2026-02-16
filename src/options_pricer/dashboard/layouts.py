@@ -54,6 +54,7 @@ def _make_empty_rows(n: int = 2) -> list[dict]:
 
 _BLOTTER_COLUMNS = [
     {"name": "Time", "id": "added_time", "editable": False},
+    {"name": "User", "id": "created_by", "editable": False},
     {"name": "Underlying", "id": "underlying", "editable": False},
     {"name": "Structure", "id": "structure", "editable": False},
     {"name": "Bid", "id": "bid", "editable": False},
@@ -71,7 +72,7 @@ _BLOTTER_COLUMNS = [
 ]
 
 _DEFAULT_VISIBLE = [
-    "added_time", "underlying", "structure", "bid", "mid", "offer",
+    "added_time", "created_by", "underlying", "structure", "bid", "mid", "offer",
     "side", "size", "traded", "traded_price", "initiator", "pnl",
 ]
 
@@ -82,12 +83,97 @@ _DEFAULT_HIDDEN = ["bid_size", "offer_size", "bought_sold"]
 # Layout components
 # ---------------------------------------------------------------------------
 
+def create_username_modal():
+    """Full-screen blocking modal for username entry on first load."""
+    return html.Div(
+        id="username-modal",
+        style={
+            "position": "fixed",
+            "top": "0",
+            "left": "0",
+            "width": "100vw",
+            "height": "100vh",
+            "backgroundColor": "rgba(0, 0, 0, 0.85)",
+            "display": "flex",
+            "justifyContent": "center",
+            "alignItems": "center",
+            "zIndex": "9999",
+        },
+        children=[
+            html.Div(
+                style={
+                    "backgroundColor": "#1a1a2e",
+                    "padding": "40px",
+                    "borderRadius": "12px",
+                    "border": "1px solid #333",
+                    "textAlign": "center",
+                    "maxWidth": "400px",
+                    "width": "90%",
+                },
+                children=[
+                    html.H2("Welcome", style={"color": "#00d4ff", "marginBottom": "10px"}),
+                    html.P("Enter your name to continue", style={"color": "#aaa", "marginBottom": "20px"}),
+                    dcc.Input(
+                        id="username-input",
+                        type="text",
+                        placeholder="Your name",
+                        maxLength=20,
+                        autoFocus=True,
+                        style={
+                            **_INPUT_STYLE,
+                            "width": "100%",
+                            "boxSizing": "border-box",
+                            "fontSize": "16px",
+                            "padding": "12px",
+                            "textAlign": "center",
+                        },
+                    ),
+                    html.Button(
+                        "Enter",
+                        id="username-submit-btn",
+                        n_clicks=0,
+                        style={
+                            "marginTop": "15px",
+                            "padding": "10px 40px",
+                            "fontSize": "16px",
+                            "backgroundColor": "#0d6efd",
+                            "color": "white",
+                            "border": "none",
+                            "borderRadius": "4px",
+                            "cursor": "pointer",
+                        },
+                    ),
+                    html.Div(id="username-error", style={"color": "#ff4444", "marginTop": "8px"}),
+                ],
+            ),
+        ],
+    )
+
+
 def create_header():
     return html.Div(
         className="header",
+        style={"display": "flex", "justifyContent": "space-between", "alignItems": "flex-start"},
         children=[
-            html.H1("IDB Options Pricer"),
-            html.P("Equity Derivatives Structure Pricing Tool"),
+            html.Div([
+                html.H1("IDB Options Pricer"),
+                html.P("Equity Derivatives Structure Pricing Tool"),
+            ]),
+            html.Div(
+                id="user-info",
+                style={
+                    "display": "flex",
+                    "alignItems": "center",
+                    "gap": "12px",
+                    "fontFamily": "monospace",
+                    "fontSize": "13px",
+                    "paddingTop": "10px",
+                },
+                children=[
+                    html.Span(id="user-display", style={"color": "#00d4ff"}),
+                    html.Span(id="online-count", style={"color": "#aaa"}),
+                ],
+            ),
         ],
     )
 
@@ -626,9 +712,9 @@ def create_layout():
     """Build the full dashboard layout.
 
     Called by Dash on each page load (app.layout = create_layout) so that
-    persisted orders are loaded from JSON on refresh.
+    persisted orders are loaded from SQLite on refresh.
     """
-    # Load persisted orders from JSON
+    # Load persisted orders from SQLite
     orders = load_orders()
     blotter_data = [
         {k: v for k, v in o.items() if not k.startswith("_")}
@@ -647,12 +733,20 @@ def create_layout():
             "boxSizing": "border-box",
         },
         children=[
+            # Username modal (blocking overlay until name entered)
+            create_username_modal(),
             # Session data stores
             dcc.Store(id="current-structure", data=None),
             dcc.Store(id="order-store", data=orders),
             dcc.Store(id="suppress-template", data=False),
             dcc.Store(id="auto-price-suppress", data=False),
             dcc.Store(id="blotter-edit-suppress", data=False),
+            # Multi-user stores
+            dcc.Store(id="current-user", storage_type="session", data=""),
+            dcc.Store(id="ws-blotter-refresh", data=0),
+            dcc.Store(id="ws-online-count", data=0),
+            # Fallback polling interval for blotter sync (every 5s)
+            dcc.Interval(id="blotter-poll", interval=5000, n_intervals=0),
             create_header(),
             html.Hr(style={"borderColor": "#333"}),
             create_order_input(),

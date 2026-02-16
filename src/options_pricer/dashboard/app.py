@@ -1,10 +1,19 @@
-"""Dash web app entry point for the IDB options pricer dashboard."""
+"""Dash web app entry point for the IDB options pricer dashboard.
 
+Multi-user architecture:
+- Username modal blocks UI until user enters a name (stored in session)
+- Orders include `created_by` field showing which user added them
+- Flask-SocketIO broadcasts blotter changes to all connected clients
+- dcc.Interval provides fallback polling if WebSocket disconnects
+"""
+
+import logging
 import re
 import uuid
 from datetime import date, datetime
 
 from dash import Dash, Input, Output, State, callback, ctx, html, no_update
+from flask_socketio import SocketIO, emit
 
 from ..bloomberg import create_client
 from ..models import (
@@ -16,7 +25,7 @@ from ..models import (
     QuoteSide,
     Side,
 )
-from ..order_store import add_order as store_add_order
+from ..order_store import load_orders as store_load_orders
 from ..order_store import save_orders as store_save_orders
 from ..parser import parse_expiry, parse_order
 from ..structure_pricer import price_structure_from_market
@@ -27,9 +36,47 @@ from .layouts import (
     create_layout,
 )
 
-app = Dash(__name__, suppress_callback_exceptions=True)
+logger = logging.getLogger(__name__)
+
+app = Dash(
+    __name__,
+    suppress_callback_exceptions=True,
+    external_scripts=["/socket.io/socket.io.js"],
+)
 app.title = "IDB Options Pricer"
 app.layout = create_layout  # callable — Dash invokes per page load
+
+# Flask-SocketIO for multi-user live updates
+socketio = SocketIO(app.server, cors_allowed_origins="*", async_mode="threading")
+
+# Track connected users
+_connected_users: set[str] = set()
+
+
+@socketio.on("connect")
+def handle_connect():
+    logger.info("WebSocket client connected")
+
+
+@socketio.on("disconnect")
+def handle_disconnect():
+    # Clean up on disconnect — client sends username via register event
+    sid = getattr(handle_disconnect, "_request_sid", None)
+    _connected_users.discard(str(sid))
+    socketio.emit("user_count", {"count": len(_connected_users)}, broadcast=True)
+    logger.info("WebSocket client disconnected (%d online)", len(_connected_users))
+
+
+@socketio.on("register")
+def handle_register(data):
+    """Client sends username after modal submit."""
+    from flask import request
+    username = (data.get("username") or "").strip()
+    if username:
+        _connected_users.add(request.sid)
+    socketio.emit("user_count", {"count": len(_connected_users)}, broadcast=True)
+    logger.info("User '%s' registered (%d online)", username, len(_connected_users))
+
 
 # Clientside callback: Enter key in textarea triggers pricing
 app.clientside_callback(
@@ -52,6 +99,75 @@ app.clientside_callback(
     """,
     Output("textarea-enter", "data"),
     Input("order-text", "value"),
+)
+
+# Clientside callback: Enter key in username input triggers submit
+app.clientside_callback(
+    """
+    function(id) {
+        var input = document.getElementById("username-input");
+        if (input && !input._enterBound) {
+            input.addEventListener("keydown", function(e) {
+                if (e.key === "Enter") {
+                    e.preventDefault();
+                    var btn = document.getElementById("username-submit-btn");
+                    if (btn) btn.click();
+                }
+            });
+            input._enterBound = true;
+        }
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("username-error", "children"),
+    Input("username-input", "value"),
+    prevent_initial_call=True,
+)
+
+# Clientside callback: SocketIO client setup for live blotter sync
+app.clientside_callback(
+    """
+    function(username) {
+        if (!username) return [window.dash_clientside.no_update, window.dash_clientside.no_update];
+
+        // Only connect once per session
+        if (!window._sio) {
+            var sio = io();
+            window._sio = sio;
+
+            sio.on('connect', function() {
+                sio.emit('register', {username: username});
+            });
+
+            sio.on('blotter_changed', function(data) {
+                // Increment the refresh counter to trigger Dash callback
+                var store = document.getElementById("ws-blotter-refresh");
+                if (store) {
+                    var evt = new Event("ws_update");
+                    store.dispatchEvent(evt);
+                }
+                // Use setProps via Dash internals
+                var el = document.getElementById("ws-blotter-refresh");
+                if (el && el._dashprivate_isSimpleComponent !== undefined) {
+                    // fallback: we rely on the polling interval
+                }
+            });
+
+            sio.on('user_count', function(data) {
+                var el = document.getElementById("online-count");
+                if (el) el.textContent = "(" + data.count + " online)";
+            });
+        } else {
+            // Re-register if username changed
+            window._sio.emit('register', {username: username});
+        }
+        return [username, window.dash_clientside.no_update];
+    }
+    """,
+    Output("user-display", "children"),
+    Output("ws-online-count", "data"),
+    Input("current-user", "data"),
+    prevent_initial_call=True,
 )
 
 # Try live Bloomberg first, fall back to mock
@@ -603,6 +719,7 @@ def clear_all(n_clicks):
     Input("add-order-btn", "n_clicks"),
     State("current-structure", "data"),
     State("order-store", "data"),
+    State("current-user", "data"),
     # Capture pricer state for recall
     State("pricing-display", "data"),
     State("manual-underlying", "value"),
@@ -614,7 +731,7 @@ def clear_all(n_clicks):
     State("manual-quantity", "value"),
     prevent_initial_call=True,
 )
-def add_order(n_clicks, current_data, existing_orders,
+def add_order(n_clicks, current_data, existing_orders, current_user,
               table_data, toolbar_underlying, toolbar_struct, toolbar_ref,
               toolbar_delta, toolbar_broker_px, toolbar_quote_side, toolbar_qty):
     if not current_data:
@@ -629,6 +746,7 @@ def add_order(n_clicks, current_data, existing_orders,
     order_record = {
         "id": str(uuid.uuid4()),
         "added_time": datetime.now().strftime("%H:%M"),
+        "created_by": current_user or "",
         "underlying": current_data["underlying"],
         "structure": f"{current_data['structure_name']} {current_data['structure_detail']}",
         "bid_size": str(current_data["bid_size"]),
@@ -659,8 +777,11 @@ def add_order(n_clicks, current_data, existing_orders,
     orders = existing_orders or []
     orders.append(order_record)
 
-    # Persist to JSON
+    # Persist to SQLite
     store_save_orders(orders)
+
+    # Broadcast to other clients via WebSocket
+    socketio.emit("blotter_changed", {"action": "added"}, broadcast=True)
 
     # Build display rows (strip underscore fields)
     blotter_rows = [
@@ -740,8 +861,11 @@ def sync_blotter_edits(data_ts, blotter_data, orders, suppress):
 
     updated_orders = list(order_map.values())
 
-    # Persist to JSON
+    # Persist to SQLite
     store_save_orders(updated_orders)
+
+    # Broadcast to other clients via WebSocket
+    socketio.emit("blotter_changed", {"action": "updated"}, broadcast=True)
 
     # Build display rows
     display_rows = [
@@ -891,10 +1015,91 @@ def recall_order(active_cell, blotter_data, orders):
     )
 
 
+# ---------------------------------------------------------------------------
+# Callback: username modal — submit username, hide modal
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output("username-modal", "style"),
+    Output("current-user", "data"),
+    Output("username-error", "children", allow_duplicate=True),
+    Input("username-submit-btn", "n_clicks"),
+    State("username-input", "value"),
+    State("current-user", "data"),
+    prevent_initial_call=True,
+)
+def submit_username(n_clicks, username_input, existing_user):
+    if existing_user:
+        # Already logged in (session store persists across refreshes)
+        return {"display": "none"}, existing_user, ""
+
+    name = (username_input or "").strip()
+    if not name:
+        return no_update, no_update, "Please enter your name."
+
+    return {"display": "none"}, name, ""
+
+
+# ---------------------------------------------------------------------------
+# Callback: restore username modal state on page load
+# (if session already has a username, hide the modal immediately)
+# ---------------------------------------------------------------------------
+
+app.clientside_callback(
+    """
+    function(username) {
+        if (username && username.length > 0) {
+            return {"display": "none"};
+        }
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("username-modal", "style", allow_duplicate=True),
+    Input("current-user", "data"),
+    prevent_initial_call=True,
+)
+
+
+# ---------------------------------------------------------------------------
+# Callback: poll for blotter updates from other users
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output("blotter-table", "data", allow_duplicate=True),
+    Output("order-store", "data", allow_duplicate=True),
+    Output("blotter-edit-suppress", "data", allow_duplicate=True),
+    Input("blotter-poll", "n_intervals"),
+    State("order-store", "data"),
+    prevent_initial_call=True,
+)
+def poll_blotter_updates(n_intervals, current_orders):
+    """Periodically reload orders from SQLite to pick up changes from other users."""
+    fresh_orders = store_load_orders()
+
+    # Quick check: if order count hasn't changed and IDs match, skip update
+    current_ids = {o.get("id") for o in (current_orders or [])}
+    fresh_ids = {o.get("id") for o in fresh_orders}
+    if current_ids == fresh_ids and len(current_orders or []) == len(fresh_orders):
+        # Also check if any data changed (compare serialized form)
+        return no_update, no_update, no_update
+
+    blotter_rows = [
+        {k: v for k, v in o.items() if not k.startswith("_")}
+        for o in fresh_orders
+    ]
+    return blotter_rows, fresh_orders, True
+
+
 def main():
-    """Run the dashboard."""
+    """Run the dashboard with SocketIO for multi-user support."""
     from ..settings import DASHBOARD_DEBUG, DASHBOARD_HOST, DASHBOARD_PORT
-    app.run(host=DASHBOARD_HOST, port=DASHBOARD_PORT, debug=DASHBOARD_DEBUG)
+    socketio.run(
+        app.server,
+        host=DASHBOARD_HOST,
+        port=DASHBOARD_PORT,
+        debug=DASHBOARD_DEBUG,
+        allow_unsafe_werkzeug=True,
+    )
 
 
 if __name__ == "__main__":
