@@ -123,3 +123,22 @@ class StructureMarketData:
     @property
     def structure_mid(self) -> float:
         return (self.structure_bid + self.structure_offer) / 2.0
+
+
+@dataclass
+class TradeRecord:
+    """A completed trade recorded in the blotter."""
+
+    underlying: str
+    structure_name: str
+    structure_detail: str
+    bid: float
+    mid: float
+    offer: float
+    bid_size: int
+    offer_size: int
+    buyer_seller: str
+    traded_price: float
+    size: int
+    multiplier: int
+    pnl: float

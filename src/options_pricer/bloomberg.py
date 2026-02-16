@@ -146,6 +146,32 @@ class BloombergClient:
             return 0.05
         return 0.05
 
+    def get_contract_multiplier(self, underlying: str) -> int:
+        """Fetch OPT_CONT_SIZE from Bloomberg for the underlying's options."""
+        if not self._session:
+            return 100
+        try:
+            import blpapi
+
+            refdata = self._session.getService("//blp/refdata")
+            request = refdata.createRequest("ReferenceDataRequest")
+            request.append("securities", f"{underlying} US Equity")
+            request.append("fields", "OPT_CONT_SIZE")
+            self._session.sendRequest(request)
+
+            while True:
+                event = self._session.nextEvent(500)
+                for msg in event:
+                    if msg.hasElement("securityData"):
+                        sec_data = msg.getElement("securityData").getValueAsElement(0)
+                        field_data = sec_data.getElement("fieldData")
+                        return int(field_data.getElementAsFloat("OPT_CONT_SIZE"))
+                if event.eventType() == blpapi.Event.RESPONSE:
+                    break
+        except Exception:
+            pass
+        return 100
+
     def get_market_data(self, underlying: str) -> MarketData:
         spot = self.get_spot(underlying)
         rate = self.get_risk_free_rate()
@@ -247,6 +273,10 @@ class MockBloombergClient:
 
     def get_risk_free_rate(self) -> float:
         return 0.05
+
+    def get_contract_multiplier(self, underlying: str) -> int:
+        """Return contract multiplier. 100 for equity options."""
+        return 100
 
     def get_market_data(self, underlying: str) -> MarketData:
         return MarketData(

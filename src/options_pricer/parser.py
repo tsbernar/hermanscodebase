@@ -62,6 +62,8 @@ def parse_order(text: str) -> ParsedOrder:
     ratio_tuple = _extract_ratio(original)
     modifier = _extract_modifier(original)
     structure_type = _extract_structure_type(original)
+    is_live = _extract_is_live(original)
+    delta_direction = _extract_delta_direction(original)
 
     # Parse core: ticker, expiries, strikes, option type
     ticker, leg_specs, default_opt_type = _parse_core(original, structure_type)
@@ -100,6 +102,29 @@ def parse_order(text: str) -> ParsedOrder:
         description=original,
     )
 
+    # LIVE = options only, no stock hedge
+    if is_live:
+        stock_ref = 0.0
+        delta = 0.0
+
+    # Apply delta sign from direction qualifier
+    if delta and delta_direction:
+        if delta_direction == "put":
+            delta = -abs(delta)
+        elif delta_direction == "call":
+            delta = abs(delta)
+        elif delta_direction == "1x":
+            # "delta to the 1x": for CS the 1x is the buy leg (positive delta),
+            # for PS the 1x is the sell leg (also positive delta — short put)
+            if structure_type in ("call_spread", "put_spread"):
+                delta = abs(delta)
+        elif delta_direction == "2x":
+            # "delta to the 2x": opposite direction
+            if structure_type == "call_spread":
+                delta = -abs(delta)
+            elif structure_type == "put_spread":
+                delta = -abs(delta)
+
     return ParsedOrder(
         underlying=ticker.upper(),
         structure=structure,
@@ -131,8 +156,8 @@ def _extract_stock_ref(text: str) -> float | None:
 
 
 def _extract_delta(text: str) -> float | None:
-    """Extract delta: 30d, 3d, on a 11d."""
-    m = re.search(r'(?:on\s+a\s+)?(\d+)\s*d\b', text, re.IGNORECASE)
+    """Extract delta: 30d, 3d, on a 11d, +20d, -15d."""
+    m = re.search(r'(?:on\s+a\s+)?([+-]?\d+)\s*d\b', text, re.IGNORECASE)
     if m:
         return float(m.group(1))
     return None
@@ -223,6 +248,36 @@ def _extract_modifier(text: str) -> str | None:
     return None
 
 
+def _extract_is_live(text: str) -> bool:
+    """Check if the order is LIVE (no stock hedge, options only)."""
+    return bool(re.search(r'\bLIVE\b', text, re.IGNORECASE))
+
+
+def _extract_delta_direction(text: str) -> str | None:
+    """Extract delta direction qualifier.
+
+    Returns:
+        "call" for positive/call-like delta,
+        "put" for negative/put-like delta,
+        "1x" for delta to the 1x leg,
+        "2x" for delta to the 2x leg,
+        None if no direction specified.
+    """
+    # "delta to the 1x" / "delta to the 2x"
+    m = re.search(r'\bdelta\s+to\s+the\s+(\d+)x\b', text, re.IGNORECASE)
+    if m:
+        return f"{m.group(1)}x"
+
+    # "delta to put" / "delta to call" / "delta like put" / "delta like call"
+    m = re.search(
+        r'\bdelta\s+(?:to|like)\s+(put|call)\b', text, re.IGNORECASE
+    )
+    if m:
+        return m.group(1).lower()
+
+    return None
+
+
 def _extract_structure_type(text: str) -> str | None:
     """Extract structure type from text."""
     text_lower = text.lower()
@@ -240,7 +295,7 @@ def _extract_structure_type(text: str) -> str | None:
 # Core parsing: ticker, expiries, strikes, option type
 # ---------------------------------------------------------------------------
 
-def _parse_expiry(expiry_str: str, year_str: str | None = None) -> date:
+def parse_expiry(expiry_str: str, year_str: str | None = None) -> date:
     """Parse expiry like 'Jun26' -> date(2026, 6, 16)."""
     month_str = expiry_str[:3].lower()
     month = _MONTHS.get(month_str)
@@ -291,7 +346,9 @@ def _parse_core(text: str, structure_type: str | None) -> tuple[
         r'^\d+x$',  # quantity
         r'^(?:bid|offer|ask|at)$',
         r'^(?:on|a)$',
-        r'^\d+d$',  # delta
+        r'^[+-]?\d+d$',  # delta (including +20d, -15d)
+        r'^(?:delta|live)$',  # delta direction / live qualifier
+        r'^(?:the|like|to)$',  # parts of "delta to the 1x" etc.
         r'^@',
         r'^(?:' + '|'.join(re.escape(a) for a in _STRUCTURE_ALIASES.keys()
                            if ' ' not in a) + r')$',
@@ -311,14 +368,9 @@ def _parse_core(text: str, structure_type: str | None) -> tuple[
             month_str = month_match.group(1)
             year_str = month_match.group(2)
 
-            # Check if next token is a year (for "Jun 26" as two tokens)
-            if not year_str and i + 1 < len(tokens):
-                next_tok = tokens[i + 1]
-                if re.match(r'^\d{2}$', next_tok):
-                    year_str = next_tok
-                    i += 1
-
-            current_expiry = _parse_expiry(month_str, year_str)
+            # Year must be part of the month token (e.g. "jun26"), never a
+            # separate token.  A standalone number after the month is a strike.
+            current_expiry = parse_expiry(month_str, year_str)
 
             # Look ahead for strike
             if i + 1 < len(tokens):
@@ -339,6 +391,42 @@ def _parse_core(text: str, structure_type: str | None) -> tuple[
                         "type": opt_type,
                     })
                     i += 2
+
+                    # Check for additional space-separated strikes (e.g. "250 240 PS")
+                    _MULTI_LEG = {
+                        "put_spread", "call_spread", "spread",
+                        "risk_reversal", "strangle", "butterfly",
+                    }
+                    while i < len(tokens):
+                        next_strike = re.match(
+                            r'^(\d+\.?\d*)([PCpc])?$', tokens[i]
+                        )
+                        if not next_strike:
+                            break
+                        ns_val = float(next_strike.group(1))
+                        ns_type_char = next_strike.group(2)
+                        # Only grab as a strike if structure needs multiple legs
+                        # or the token right after is a structure keyword
+                        is_multi = structure_type in _MULTI_LEG
+                        next_is_struct = (
+                            i + 1 < len(tokens)
+                            and tokens[i + 1].lower() in _STRUCTURE_ALIASES
+                        )
+                        if not is_multi and not next_is_struct:
+                            break
+                        ns_opt = None
+                        if ns_type_char:
+                            ns_opt = (
+                                OptionType.CALL if ns_type_char.upper() == 'C'
+                                else OptionType.PUT
+                            )
+                        leg_specs.append({
+                            "expiry": current_expiry,
+                            "strike": ns_val,
+                            "type": ns_opt,
+                        })
+                        i += 1
+
                     continue
 
                 # Check for slash strikes: "240/220"
@@ -391,7 +479,7 @@ def _parse_core(text: str, structure_type: str | None) -> tuple[
                     r'^(' + _MONTH_PATTERN + r')(\d{2})?$', next_lower
                 )
                 if ahead_month:
-                    expiry = _parse_expiry(
+                    expiry = parse_expiry(
                         ahead_month.group(1), ahead_month.group(2)
                     )
                     leg_specs.append({
@@ -437,33 +525,41 @@ def _parse_core(text: str, structure_type: str | None) -> tuple[
             continue
 
         # Check for option type word: "calls", "puts", "call", "put"
-        if token_lower in ("call", "calls"):
+        # Skip if part of "delta to/like call/put" or "call/put over"
+        prev_lower = tokens[i - 1].lower() if i > 0 else ""
+        next_lower = tokens[i + 1].lower() if i + 1 < len(tokens) else ""
+        is_delta_phrase = prev_lower in ("to", "like")
+        is_over_phrase = next_lower == "over"
+        if token_lower in ("call", "calls") and not is_delta_phrase and not is_over_phrase:
             default_opt_type = OptionType.CALL
             i += 1
             continue
-        if token_lower in ("put", "puts"):
+        if token_lower in ("put", "puts") and not is_delta_phrase and not is_over_phrase:
             default_opt_type = OptionType.PUT
             i += 1
             continue
 
         # Check for bare strike number followed by "calls" or "puts"
+        # Skip if the call/put is part of "call over" / "put over" / "delta to call"
         bare_strike = re.match(r'^(\d+\.?\d*)$', token)
         if bare_strike and i + 1 < len(tokens):
             next_lower = tokens[i + 1].lower()
             if next_lower in ("call", "calls", "put", "puts"):
-                strike_val = float(bare_strike.group(1))
-                opt_type = (
-                    OptionType.CALL if next_lower.startswith("call")
-                    else OptionType.PUT
-                )
-                default_opt_type = opt_type
-                leg_specs.append({
-                    "expiry": current_expiry,
-                    "strike": strike_val,
-                    "type": opt_type,
-                })
-                i += 2
-                continue
+                after_next = tokens[i + 2].lower() if i + 2 < len(tokens) else ""
+                if after_next != "over":
+                    strike_val = float(bare_strike.group(1))
+                    opt_type = (
+                        OptionType.CALL if next_lower.startswith("call")
+                        else OptionType.PUT
+                    )
+                    default_opt_type = opt_type
+                    leg_specs.append({
+                        "expiry": current_expiry,
+                        "strike": strike_val,
+                        "type": opt_type,
+                    })
+                    i += 2
+                    continue
 
         i += 1
 
