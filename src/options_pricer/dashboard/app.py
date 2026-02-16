@@ -1,6 +1,7 @@
 """Dash web app entry point for the IDB options pricer dashboard."""
 
 import re
+import uuid
 from datetime import date, datetime
 
 from dash import Dash, Input, Output, State, callback, ctx, html, no_update
@@ -15,13 +16,43 @@ from ..models import (
     QuoteSide,
     Side,
 )
+from ..order_store import add_order as store_add_order
+from ..order_store import save_orders as store_save_orders
 from ..parser import parse_expiry, parse_order
 from ..structure_pricer import price_structure_from_market
-from .layouts import _EMPTY_ROW, _make_empty_rows, create_layout
+from .layouts import (
+    _BLOTTER_COLUMNS,
+    _EMPTY_ROW,
+    _make_empty_rows,
+    create_layout,
+)
 
 app = Dash(__name__, suppress_callback_exceptions=True)
 app.title = "IDB Options Pricer"
-app.layout = create_layout()
+app.layout = create_layout  # callable — Dash invokes per page load
+
+# Clientside callback: Enter key in textarea triggers pricing
+app.clientside_callback(
+    """
+    function(id) {
+        var textarea = document.getElementById("order-text");
+        if (textarea && !textarea._enterBound) {
+            textarea.addEventListener("keydown", function(e) {
+                if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    var store = document.getElementById("textarea-enter");
+                    var btn = document.getElementById("price-btn");
+                    if (btn) btn.click();
+                }
+            });
+            textarea._enterBound = true;
+        }
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("textarea-enter", "data"),
+    Input("order-text", "value"),
+)
 
 # Try live Bloomberg first, fall back to mock
 _client = create_client(use_mock=False)
@@ -50,7 +81,7 @@ _BROKER_VISIBLE_STYLE = {
     "alignItems": "center",
 }
 
-_TRADE_INPUT_VISIBLE_STYLE = {
+_ORDER_INPUT_VISIBLE_STYLE = {
     "backgroundColor": "#1a1a2e",
     "padding": "15px 20px",
     "borderRadius": "6px",
@@ -107,7 +138,7 @@ _PRICE_ORDER_ERR_TAIL = (
     _HIDDEN, [],           # order-header style, content
     _HIDDEN, [],           # broker-quote style, content
     None,                  # current-structure
-    _HIDDEN,               # trade-input-section
+    _HIDDEN,               # order-input-section
     no_update, no_update,  # underlying, structure-type
     no_update, no_update,  # stock-ref, delta
     no_update, no_update,  # broker-price, quote-side
@@ -188,7 +219,7 @@ def _build_table_data(order, leg_market, struct_data):
 
 
 def _build_header_and_extras(order, spot, struct_data, multiplier):
-    """Build order header, broker quote, current-structure store, trade input style."""
+    """Build order header, broker quote, current-structure store, order input style."""
     header_items = []
     structure_name = order.structure.name.upper()
     header_items.append(
@@ -251,7 +282,7 @@ def _build_header_and_extras(order, spot, struct_data, multiplier):
     return (
         _HEADER_VISIBLE_STYLE, header_items,
         broker_style, broker_content,
-        current_data, _TRADE_INPUT_VISIBLE_STYLE,
+        current_data, _ORDER_INPUT_VISIBLE_STYLE,
     )
 
 
@@ -316,7 +347,7 @@ def _build_legs_from_table(table_data, underlying, order_qty):
     Output("broker-quote-section", "style"),
     Output("broker-quote-content", "children"),
     Output("current-structure", "data"),
-    Output("trade-input-section", "style"),
+    Output("order-input-section", "style"),
     Output("manual-underlying", "value"),
     Output("manual-structure-type", "value"),
     Output("manual-stock-ref", "value"),
@@ -341,7 +372,7 @@ def price_order(n_clicks, order_text):
 
     spot, leg_market, struct_data, multiplier = _fetch_and_price(order)
     table_data = _build_table_data(order, leg_market, struct_data)
-    header_style, header_items, broker_style, broker_content, current_data, trade_input_style = (
+    header_style, header_items, broker_style, broker_content, current_data, order_input_style = (
         _build_header_and_extras(order, spot, struct_data, multiplier)
     )
 
@@ -356,14 +387,14 @@ def price_order(n_clicks, order_text):
         broker_style,               # broker-quote-section style
         broker_content,             # broker-quote-content
         current_data,               # current-structure
-        trade_input_style,          # trade-input-section style
+        order_input_style,          # order-input-section style
         order.underlying,           # manual-underlying
         struct_dropdown,            # manual-structure-type
         order.stock_ref if order.stock_ref > 0 else None,
         order.delta if order.delta != 0 else None,
         order.price if order.price > 0 else None,
         order.quote_side.value,     # manual-quote-side
-        order.quantity if order.quantity > 0 else 100,
+        order.quantity if order.quantity > 0 else None,
         True,                       # suppress-template
         True,                       # auto-price-suppress
     )
@@ -427,7 +458,7 @@ def toggle_table_rows(add_clicks, remove_clicks, current_data):
 
 
 # ---------------------------------------------------------------------------
-# Callback: auto-price from table (replaces manual price_from_table)
+# Callback: auto-price from table
 # ---------------------------------------------------------------------------
 
 @callback(
@@ -438,7 +469,7 @@ def toggle_table_rows(add_clicks, remove_clicks, current_data):
     Output("broker-quote-section", "style", allow_duplicate=True),
     Output("broker-quote-content", "children", allow_duplicate=True),
     Output("current-structure", "data", allow_duplicate=True),
-    Output("trade-input-section", "style", allow_duplicate=True),
+    Output("order-input-section", "style", allow_duplicate=True),
     Output("auto-price-suppress", "data", allow_duplicate=True),
     Input("pricing-display", "data_timestamp"),
     Input("manual-underlying", "value"),
@@ -455,8 +486,6 @@ def toggle_table_rows(add_clicks, remove_clicks, current_data):
 def auto_price_from_table(data_ts, underlying, suppress,
                           table_data, struct_type, stock_ref,
                           delta, broker_price, quote_side_val, order_qty):
-    # 9 outputs: table-error, pricing-display, header style/content,
-    #            broker style/content, current-structure, trade-input, auto-suppress
     noop = ("",) + (no_update,) * 7 + (False,)
 
     if suppress:
@@ -466,16 +495,14 @@ def auto_price_from_table(data_ts, underlying, suppress,
         return noop
 
     underlying = underlying.strip().upper()
-    order_qty_val = int(order_qty) if order_qty else 100
+    order_qty_val = int(order_qty) if order_qty else 1
 
     legs, err_msg = _build_legs_from_table(table_data, underlying, order_qty_val)
 
     if err_msg:
-        # Genuine error (e.g. bad expiry format)
         return (err_msg,) + (no_update,) * 7 + (False,)
 
     if legs is None or len(legs) == 0:
-        # Incomplete or empty rows — skip silently
         return noop
 
     struct_name = struct_type.replace("_", " ") if struct_type else "custom"
@@ -496,7 +523,7 @@ def auto_price_from_table(data_ts, underlying, suppress,
         return (f"Pricing error: {e}",) + (no_update,) * 7 + (False,)
 
     new_table = _build_table_data(order, leg_market, struct_data)
-    header_style, header_items, broker_style, broker_content, current_data, trade_input_style = (
+    header_style, header_items, broker_style, broker_content, current_data, order_input_style = (
         _build_header_and_extras(order, spot, struct_data, multiplier)
     )
 
@@ -508,13 +535,13 @@ def auto_price_from_table(data_ts, underlying, suppress,
         broker_style,       # broker-quote-section style
         broker_content,     # broker-quote-content
         current_data,       # current-structure
-        trade_input_style,  # trade-input-section style
+        order_input_style,  # order-input-section style
         True,               # auto-price-suppress (prevent self-loop)
     )
 
 
 # ---------------------------------------------------------------------------
-# Callback: clear / reset
+# Callback: clear / reset (does NOT clear the order blotter)
 # ---------------------------------------------------------------------------
 
 @callback(
@@ -532,7 +559,7 @@ def auto_price_from_table(data_ts, underlying, suppress,
     Output("broker-quote-section", "style", allow_duplicate=True),
     Output("broker-quote-content", "children", allow_duplicate=True),
     Output("current-structure", "data", allow_duplicate=True),
-    Output("trade-input-section", "style", allow_duplicate=True),
+    Output("order-input-section", "style", allow_duplicate=True),
     Output("parse-error", "children", allow_duplicate=True),
     Output("table-error", "children", allow_duplicate=True),
     Output("auto-price-suppress", "data", allow_duplicate=True),
@@ -548,14 +575,14 @@ def clear_all(n_clicks):
         None,                 # manual-stock-ref
         None,                 # manual-delta
         None,                 # manual-broker-price
-        "bid",                # manual-quote-side (default)
-        100,                  # manual-quantity (default)
+        None,                 # manual-quote-side (neutral)
+        None,                 # manual-quantity (empty)
         _HIDDEN,              # order-header style
         [],                   # order-header-content
         _HIDDEN,              # broker-quote-section style
         [],                   # broker-quote-content
         None,                 # current-structure
-        _HIDDEN,              # trade-input-section style
+        _HIDDEN,              # order-input-section style
         "",                   # parse-error
         "",                   # table-error
         True,                 # auto-price-suppress
@@ -563,22 +590,19 @@ def clear_all(n_clicks):
 
 
 # ---------------------------------------------------------------------------
-# Callback: add trade to blotter
+# Callback: add order to blotter
 # ---------------------------------------------------------------------------
 
 @callback(
     Output("blotter-table", "data"),
-    Output("trade-store", "data"),
-    Output("trade-error", "children"),
-    Output("trade-side", "value"),
-    Output("trade-price", "value"),
-    Output("trade-size", "value"),
-    Input("add-trade-btn", "n_clicks"),
+    Output("order-store", "data"),
+    Output("order-error", "children"),
+    Output("order-side", "value"),
+    Output("order-size", "value"),
+    Output("blotter-edit-suppress", "data"),
+    Input("add-order-btn", "n_clicks"),
     State("current-structure", "data"),
-    State("trade-side", "value"),
-    State("trade-price", "value"),
-    State("trade-size", "value"),
-    State("trade-store", "data"),
+    State("order-store", "data"),
     # Capture pricer state for recall
     State("pricing-display", "data"),
     State("manual-underlying", "value"),
@@ -590,29 +614,21 @@ def clear_all(n_clicks):
     State("manual-quantity", "value"),
     prevent_initial_call=True,
 )
-def add_trade(n_clicks, current_data, side, traded_price, size, existing_trades,
+def add_order(n_clicks, current_data, existing_orders,
               table_data, toolbar_underlying, toolbar_struct, toolbar_ref,
               toolbar_delta, toolbar_broker_px, toolbar_quote_side, toolbar_qty):
     if not current_data:
         return no_update, no_update, "Price a structure first.", no_update, no_update, no_update
-    if not side:
-        return no_update, no_update, "Select Buyer or Seller.", no_update, no_update, no_update
-    if traded_price is None:
-        return no_update, no_update, "Enter traded price.", no_update, no_update, no_update
-    if size is None:
-        return no_update, no_update, "Enter size.", no_update, no_update, no_update
 
-    traded_price = float(traded_price)
-    size = int(size)
-    multiplier = current_data.get("multiplier", 100)
+    # Map toolbar side to blotter side
+    side_map = {"bid": "Bid", "offer": "Offered"}
+    blotter_side = side_map.get(toolbar_quote_side, "")
+    size_str = str(int(toolbar_qty)) if toolbar_qty else ""
     mid = current_data["mid"]
 
-    if side == "Buyer":
-        pnl = (mid - traded_price) * size * multiplier
-    else:
-        pnl = (traded_price - mid) * size * multiplier
-
-    display_row = {
+    order_record = {
+        "id": str(uuid.uuid4()),
+        "added_time": datetime.now().strftime("%H:%M"),
         "underlying": current_data["underlying"],
         "structure": f"{current_data['structure_name']} {current_data['structure_detail']}",
         "bid_size": str(current_data["bid_size"]),
@@ -620,15 +636,15 @@ def add_trade(n_clicks, current_data, side, traded_price, size, existing_trades,
         "mid": f"{mid:.2f}",
         "offer": f"{current_data['offer']:.2f}",
         "offer_size": str(current_data["offer_size"]),
-        "buyer_seller": side,
-        "traded_price": f"{traded_price:.2f}",
-        "size": str(size),
-        "pnl": f"{pnl:+,.0f}",
-        "added_time": datetime.now().strftime("%H:%M"),
-    }
-
-    full_record = {
-        **display_row,
+        "side": blotter_side,
+        "size": size_str,
+        "traded": "No",
+        "bought_sold": "",
+        "traded_price": "",
+        "initiator": "",
+        "pnl": "",
+        "multiplier": current_data.get("multiplier", 100),
+        # Recall data
         "_table_data": table_data,
         "_underlying": toolbar_underlying,
         "_structure_type": toolbar_struct,
@@ -640,19 +656,135 @@ def add_trade(n_clicks, current_data, side, traded_price, size, existing_trades,
         "_current_structure": current_data,
     }
 
-    trades = existing_trades or []
-    trades.append(full_record)
+    orders = existing_orders or []
+    orders.append(order_record)
 
+    # Persist to JSON
+    store_save_orders(orders)
+
+    # Build display rows (strip underscore fields)
     blotter_rows = [
-        {k: v for k, v in t.items() if not k.startswith("_")}
-        for t in trades
+        {k: v for k, v in o.items() if not k.startswith("_")}
+        for o in orders
     ]
 
-    return blotter_rows, trades, "", None, None, None
+    return blotter_rows, orders, "", None, None, True
 
 
 # ---------------------------------------------------------------------------
-# Callback: recall trade from blotter into pricer
+# Callback: sync blotter edits (editable cells) + PnL auto-calc
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output("order-store", "data", allow_duplicate=True),
+    Output("blotter-table", "data", allow_duplicate=True),
+    Output("blotter-edit-suppress", "data", allow_duplicate=True),
+    Input("blotter-table", "data_timestamp"),
+    State("blotter-table", "data"),
+    State("order-store", "data"),
+    State("blotter-edit-suppress", "data"),
+    prevent_initial_call=True,
+)
+def sync_blotter_edits(data_ts, blotter_data, orders, suppress):
+    if suppress:
+        return no_update, no_update, False
+
+    if not blotter_data or not orders:
+        return no_update, no_update, False
+
+    # Build lookup by id
+    order_map = {o["id"]: o for o in orders if "id" in o}
+
+    changed = False
+    editable_fields = ("side", "size", "traded", "bought_sold", "traded_price", "initiator")
+
+    for row in blotter_data:
+        order_id = row.get("id")
+        if not order_id or order_id not in order_map:
+            continue
+
+        stored = order_map[order_id]
+
+        # Sync editable fields from blotter back to store
+        for field in editable_fields:
+            new_val = row.get(field)
+            if new_val != stored.get(field):
+                stored[field] = new_val
+                changed = True
+
+        # PnL only relevant for traded orders
+        if (stored.get("traded") == "Yes"
+                and stored.get("traded_price") not in (None, "")
+                and stored.get("bought_sold") in ("Bought", "Sold")):
+            try:
+                mid = float(stored.get("mid", 0))
+                tp = float(stored["traded_price"])
+                sz = int(stored.get("size", 0))
+                mult = stored.get("multiplier", 100)
+                if stored["bought_sold"] == "Bought":
+                    pnl = (mid - tp) * sz * mult
+                else:
+                    pnl = (tp - mid) * sz * mult
+                pnl_str = f"{pnl:+,.0f}"
+            except (ValueError, TypeError):
+                pnl_str = ""
+            if stored.get("pnl") != pnl_str:
+                stored["pnl"] = pnl_str
+                changed = True
+        elif stored.get("traded") != "Yes" and stored.get("pnl") not in (None, ""):
+            stored["pnl"] = ""
+            changed = True
+
+    if not changed:
+        return no_update, no_update, False
+
+    updated_orders = list(order_map.values())
+
+    # Persist to JSON
+    store_save_orders(updated_orders)
+
+    # Build display rows
+    display_rows = [
+        {k: v for k, v in o.items() if not k.startswith("_")}
+        for o in updated_orders
+    ]
+
+    return updated_orders, display_rows, True
+
+
+# ---------------------------------------------------------------------------
+# Callback: toggle column panel visibility
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output("column-toggle-panel", "style"),
+    Input("column-toggle-btn", "n_clicks"),
+    State("column-toggle-panel", "style"),
+    prevent_initial_call=True,
+)
+def toggle_column_panel(n_clicks, current_style):
+    if current_style.get("display") == "none":
+        return {"display": "block"}
+    return {"display": "none"}
+
+
+# ---------------------------------------------------------------------------
+# Callback: update visible blotter columns
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output("blotter-table", "columns"),
+    Output("visible-columns", "data"),
+    Input("column-checklist", "value"),
+    prevent_initial_call=True,
+)
+def update_visible_columns(selected_columns):
+    visible = [c for c in _BLOTTER_COLUMNS if c["id"] in selected_columns]
+    return visible, selected_columns
+
+
+# ---------------------------------------------------------------------------
+# Callback: recall order from blotter into pricer
 # ---------------------------------------------------------------------------
 
 @callback(
@@ -669,34 +801,43 @@ def add_trade(n_clicks, current_data, side, traded_price, size, existing_trades,
     Output("broker-quote-section", "style", allow_duplicate=True),
     Output("broker-quote-content", "children", allow_duplicate=True),
     Output("current-structure", "data", allow_duplicate=True),
-    Output("trade-input-section", "style", allow_duplicate=True),
+    Output("order-input-section", "style", allow_duplicate=True),
     Output("suppress-template", "data", allow_duplicate=True),
     Output("auto-price-suppress", "data", allow_duplicate=True),
     Input("blotter-table", "active_cell"),
-    State("trade-store", "data"),
+    State("blotter-table", "data"),
+    State("order-store", "data"),
     prevent_initial_call=True,
 )
-def recall_trade(active_cell, trades):
-    if not active_cell or not trades:
+def recall_order(active_cell, blotter_data, orders):
+    if not active_cell or not orders or not blotter_data:
         return (no_update,) * 16
 
     row_idx = active_cell["row"]
-    if row_idx >= len(trades):
+    if row_idx >= len(blotter_data):
         return (no_update,) * 16
 
-    trade = trades[row_idx]
+    # Get the order id from the displayed row (handles sorted tables)
+    clicked_id = blotter_data[row_idx].get("id")
+    if not clicked_id:
+        return (no_update,) * 16
 
-    table_data = trade.get("_table_data")
+    # Find the full order in the store by id
+    order = next((o for o in orders if o.get("id") == clicked_id), None)
+    if not order:
+        return (no_update,) * 16
+
+    table_data = order.get("_table_data")
     if not table_data:
         return (no_update,) * 16
 
-    current_data = trade.get("_current_structure")
+    current_data = order.get("_current_structure")
 
     header_style = _HIDDEN
     header_items = []
     broker_style = _HIDDEN
     broker_content = []
-    trade_input_style = _HIDDEN
+    order_input_style = _HIDDEN
 
     if current_data:
         header_items = [
@@ -706,11 +847,11 @@ def recall_trade(active_cell, trades):
             ),
         ]
         header_style = _HEADER_VISIBLE_STYLE
-        trade_input_style = _TRADE_INPUT_VISIBLE_STYLE
+        order_input_style = _ORDER_INPUT_VISIBLE_STYLE
 
-        broker_px = trade.get("_broker_price")
+        broker_px = order.get("_broker_price")
         if broker_px and float(broker_px) > 0:
-            quote_side = (trade.get("_quote_side") or "bid").upper()
+            quote_side = (order.get("_quote_side") or "bid").upper()
             mid = current_data["mid"]
             edge = float(broker_px) - mid
             edge_color = "#00ff88" if edge > 0 else "#ff4444"
@@ -732,19 +873,19 @@ def recall_trade(active_cell, trades):
 
     return (
         table_data,
-        trade.get("_underlying"),
-        trade.get("_structure_type"),
-        trade.get("_stock_ref"),
-        trade.get("_delta"),
-        trade.get("_broker_price"),
-        trade.get("_quote_side"),
-        trade.get("_quantity"),
+        order.get("_underlying"),
+        order.get("_structure_type"),
+        order.get("_stock_ref"),
+        order.get("_delta"),
+        order.get("_broker_price"),
+        order.get("_quote_side"),
+        order.get("_quantity"),
         header_style,
         header_items,
         broker_style,
         broker_content,
         current_data,
-        trade_input_style,
+        order_input_style,
         True,   # suppress-template
         True,   # auto-price-suppress
     )

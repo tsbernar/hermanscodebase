@@ -164,7 +164,8 @@ def _extract_delta(text: str) -> float | None:
 
 
 def _extract_quantity(text: str) -> int | None:
-    """Extract contract quantity: 1058x, 600x, 2500x."""
+    """Extract contract quantity: 1058x, 600x, 2500x, 1k, 2k."""
+    # Try Nx format first (e.g. 500x, 1000x)
     m = re.search(r'(\d+)\s*x\b', text, re.IGNORECASE)
     if m:
         # Avoid matching ratio patterns like 1X2
@@ -180,6 +181,10 @@ def _extract_quantity(text: str) -> int | None:
                 return int(m2.group(1))
             return None
         return val
+    # Try Nk format (e.g. 1k = 1000, 2k = 2000)
+    m = re.search(r'\b(\d+)\s*k\b', text, re.IGNORECASE)
+    if m:
+        return int(m.group(1)) * 1000
     return None
 
 
@@ -344,6 +349,7 @@ def _parse_core(text: str, structure_type: str | None) -> tuple[
         r'^(?:vs\.?|tt?)$',  # stock ref prefix
         r'^\d+\.?\d*$',  # bare numbers (could be stock ref value, price, etc.)
         r'^\d+x$',  # quantity
+        r'^\d+k$',  # quantity in thousands (1k = 1000)
         r'^(?:bid|offer|ask|at)$',
         r'^(?:on|a)$',
         r'^[+-]?\d+d$',  # delta (including +20d, -15d)

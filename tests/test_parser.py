@@ -65,6 +65,15 @@ class TestExtractQuantity:
         # Should not match the "1" in "1X2", should match "500x"
         assert _extract_quantity("PS 1X2 500x") == 500
 
+    def test_k_format_simple(self):
+        assert _extract_quantity("1k") == 1000
+
+    def test_k_format_larger(self):
+        assert _extract_quantity("2k") == 2000
+
+    def test_k_format_in_context(self):
+        assert _extract_quantity("goog jun 100 90 ps vs 200.00 10d 1 bid 1k") == 1000
+
 
 class TestExtractPriceAndSide:
     def test_bid_word(self):
