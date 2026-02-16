@@ -30,6 +30,7 @@ from ..order_store import save_orders as store_save_orders
 from ..parser import parse_expiry, parse_order
 from ..structure_pricer import price_structure_from_market
 from .layouts import (
+    COLORS,
     _BLOTTER_COLUMNS,
     _EMPTY_ROW,
     _make_empty_rows,
@@ -63,7 +64,7 @@ def handle_disconnect():
     # Clean up on disconnect — client sends username via register event
     sid = getattr(handle_disconnect, "_request_sid", None)
     _connected_users.discard(str(sid))
-    socketio.emit("user_count", {"count": len(_connected_users)}, broadcast=True)
+    socketio.emit("user_count", {"count": len(_connected_users)}, to="/")
     logger.info("WebSocket client disconnected (%d online)", len(_connected_users))
 
 
@@ -74,7 +75,7 @@ def handle_register(data):
     username = (data.get("username") or "").strip()
     if username:
         _connected_users.add(request.sid)
-    socketio.emit("user_count", {"count": len(_connected_users)}, broadcast=True)
+    socketio.emit("user_count", {"count": len(_connected_users)}, to="/")
     logger.info("User '%s' registered (%d online)", username, len(_connected_users))
 
 
@@ -180,28 +181,31 @@ _client = create_client(use_mock=False)
 _HIDDEN = {"display": "none"}
 
 _HEADER_VISIBLE_STYLE = {
-    "backgroundColor": "#1a1a2e",
-    "padding": "12px 20px",
-    "borderRadius": "6px",
-    "marginBottom": "15px",
+    "backgroundColor": COLORS["bg_card"],
+    "padding": "14px 20px",
+    "borderRadius": "10px",
+    "marginBottom": "14px",
+    "border": f"1px solid rgba(34, 211, 238, 0.15)",
     "display": "block",
 }
 
 _BROKER_VISIBLE_STYLE = {
-    "backgroundColor": "#1a1a2e",
-    "padding": "15px 20px",
-    "borderRadius": "6px",
-    "marginTop": "15px",
+    "backgroundColor": COLORS["bg_card"],
+    "padding": "14px 20px",
+    "borderRadius": "10px",
+    "marginTop": "14px",
+    "border": f"1px solid {COLORS['border']}",
     "display": "flex",
     "gap": "20px",
     "alignItems": "center",
 }
 
 _ORDER_INPUT_VISIBLE_STYLE = {
-    "backgroundColor": "#1a1a2e",
-    "padding": "15px 20px",
-    "borderRadius": "6px",
-    "marginTop": "15px",
+    "backgroundColor": COLORS["bg_card"],
+    "padding": "14px 20px",
+    "borderRadius": "10px",
+    "marginTop": "14px",
+    "border": f"1px solid {COLORS['border']}",
     "display": "block",
 }
 
@@ -341,7 +345,7 @@ def _build_header_and_extras(order, spot, struct_data, multiplier):
     header_items.append(
         html.Span(
             f"{order.underlying} {structure_name}",
-            style={"color": "#00d4ff", "fontWeight": "bold", "fontSize": "17px"},
+            style={"color": COLORS["text_accent"], "fontWeight": "bold", "fontSize": "17px"},
         )
     )
     if order.stock_ref > 0:
@@ -367,7 +371,7 @@ def _build_header_and_extras(order, spot, struct_data, multiplier):
             ),
         ]
         edge = order.price - abs(struct_data.structure_mid)
-        edge_color = "#00ff88" if edge > 0 else "#ff4444"
+        edge_color = COLORS["positive"] if edge > 0 else COLORS["negative"]
         broker_content.append(
             html.Span(
                 f"Edge: {edge:+.2f}",
@@ -781,7 +785,7 @@ def add_order(n_clicks, current_data, existing_orders, current_user,
     store_save_orders(orders)
 
     # Broadcast to other clients via WebSocket
-    socketio.emit("blotter_changed", {"action": "added"}, broadcast=True)
+    socketio.emit("blotter_changed", {"action": "added"}, to="/")
 
     # Build display rows (strip underscore fields)
     blotter_rows = [
@@ -865,7 +869,7 @@ def sync_blotter_edits(data_ts, blotter_data, orders, suppress):
     store_save_orders(updated_orders)
 
     # Broadcast to other clients via WebSocket
-    socketio.emit("blotter_changed", {"action": "updated"}, broadcast=True)
+    socketio.emit("blotter_changed", {"action": "updated"}, to="/")
 
     # Build display rows
     display_rows = [
@@ -967,7 +971,7 @@ def recall_order(active_cell, blotter_data, orders):
         header_items = [
             html.Span(
                 f"{current_data['underlying']} {current_data['structure_name']}",
-                style={"color": "#00d4ff", "fontWeight": "bold", "fontSize": "17px"},
+                style={"color": COLORS["text_accent"], "fontWeight": "bold", "fontSize": "17px"},
             ),
         ]
         header_style = _HEADER_VISIBLE_STYLE
@@ -978,7 +982,7 @@ def recall_order(active_cell, blotter_data, orders):
             quote_side = (order.get("_quote_side") or "bid").upper()
             mid = current_data["mid"]
             edge = float(broker_px) - mid
-            edge_color = "#00ff88" if edge > 0 else "#ff4444"
+            edge_color = COLORS["positive"] if edge > 0 else COLORS["negative"]
             broker_content = [
                 html.Span(
                     f"Broker: {float(broker_px):.2f} {quote_side}",

@@ -4,25 +4,157 @@ from dash import dcc, html, dash_table
 
 from ..order_store import load_orders
 
+# ---------------------------------------------------------------------------
+# Theme palette — refined dark trading terminal
+# ---------------------------------------------------------------------------
+
+COLORS = {
+    # Backgrounds (layered depth)
+    "bg_page": "#0a0e1a",
+    "bg_card": "#111827",
+    "bg_input": "#1a2236",
+    "bg_input_editable": "#1e2a42",
+    "bg_active_row": "#1a3352",
+    "bg_structure_row": "#0c2d4e",
+    "bg_modal_overlay": "rgba(4, 6, 14, 0.92)",
+    "bg_hover": "#162033",
+    "bg_toolbar": "#131b2e",
+
+    # Text
+    "text_primary": "#e2e8f0",
+    "text_muted": "#94a3b8",
+    "text_hint": "#4a5568",
+    "text_accent": "#22d3ee",
+    "text_heading": "#f1f5f9",
+
+    # Borders
+    "border": "#1e293b",
+    "border_light": "#334155",
+    "border_accent": "rgba(34, 211, 238, 0.15)",
+    "border_glow": "rgba(34, 211, 238, 0.25)",
+
+    # Semantic
+    "positive": "#34d399",
+    "negative": "#f87171",
+    "offer_col": "#fb923c",
+    "btn_primary": "#0ea5e9",
+    "btn_primary_hover": "#0284c7",
+    "btn_success": "#059669",
+    "btn_danger": "#7f1d1d",
+    "btn_danger_border": "#991b1b",
+    "btn_neutral": "#1e293b",
+    "btn_neutral_border": "#334155",
+}
+
+# ---------------------------------------------------------------------------
 # Reusable styles
+# ---------------------------------------------------------------------------
+
+_FONT_MONO = "'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', Consolas, monospace"
+_FONT_SANS = "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+
 _INPUT_STYLE = {
-    "padding": "8px",
-    "backgroundColor": "#16213e",
-    "color": "#e0e0e0",
-    "border": "1px solid #333",
-    "borderRadius": "4px",
-    "fontFamily": "monospace",
+    "padding": "8px 10px",
+    "backgroundColor": COLORS["bg_input"],
+    "color": COLORS["text_primary"],
+    "border": f"1px solid {COLORS['border_light']}",
+    "borderRadius": "6px",
+    "fontFamily": _FONT_MONO,
     "fontSize": "13px",
+    "outline": "none",
+    "transition": "border-color 0.2s ease, box-shadow 0.2s ease",
 }
 
 _DROPDOWN_STYLE = {
-    "width": "110px",
-    "backgroundColor": "#16213e",
-    "color": "#000",
+    "width": "130px",
+    "backgroundColor": COLORS["bg_input"],
+    "color": COLORS["text_primary"],
     "fontSize": "13px",
+    "fontFamily": _FONT_MONO,
 }
 
-_LABEL_STYLE = {"color": "#aaa", "fontSize": "12px", "marginBottom": "4px"}
+_LABEL_STYLE = {
+    "color": COLORS["text_muted"],
+    "fontSize": "11px",
+    "fontFamily": _FONT_SANS,
+    "fontWeight": "500",
+    "letterSpacing": "0.04em",
+    "textTransform": "uppercase",
+    "marginBottom": "5px",
+}
+
+_BTN_BASE = {
+    "fontFamily": _FONT_MONO,
+    "fontSize": "13px",
+    "fontWeight": "500",
+    "border": "none",
+    "borderRadius": "6px",
+    "cursor": "pointer",
+    "transition": "all 0.15s ease",
+    "letterSpacing": "0.02em",
+}
+
+# CSS rules for DataTable dropdown cells
+_TABLE_DROPDOWN_CSS = [
+    {
+        "selector": ".Select-value-label",
+        "rule": f"color: {COLORS['text_primary']} !important; font-family: {_FONT_MONO} !important;",
+    },
+    {
+        "selector": ".Select-placeholder",
+        "rule": f"color: {COLORS['text_hint']} !important; font-family: {_FONT_MONO} !important;",
+    },
+    {
+        "selector": ".Select-menu-outer",
+        "rule": (
+            f"background-color: {COLORS['bg_card']} !important; "
+            f"border: 1px solid {COLORS['border_light']} !important; "
+            f"border-radius: 6px !important; "
+            f"z-index: 9999 !important; "
+            f"overflow: visible !important;"
+        ),
+    },
+    {
+        "selector": ".Select-option",
+        "rule": (
+            f"color: {COLORS['text_primary']} !important; "
+            f"background-color: {COLORS['bg_card']} !important; "
+            f"padding: 8px 12px !important; "
+            f"font-family: {_FONT_MONO} !important;"
+        ),
+    },
+    {
+        "selector": ".Select-option.is-focused",
+        "rule": (
+            f"background-color: {COLORS['bg_input']} !important; "
+            f"color: {COLORS['text_accent']} !important;"
+        ),
+    },
+    {
+        "selector": ".dash-spreadsheet-container",
+        "rule": "overflow: visible !important;",
+    },
+    {
+        "selector": ".dash-spreadsheet",
+        "rule": "overflow: visible !important;",
+    },
+    {
+        "selector": ".Select-control",
+        "rule": (
+            f"background-color: {COLORS['bg_input']} !important; "
+            f"border-color: {COLORS['border_light']} !important; "
+            f"border-radius: 4px !important;"
+        ),
+    },
+    {
+        "selector": ".Select-arrow-zone",
+        "rule": f"color: {COLORS['text_muted']} !important;",
+    },
+    {
+        "selector": ".dash-cell",
+        "rule": "overflow: visible !important;",
+    },
+]
 
 STRUCTURE_TYPE_OPTIONS = [
     {"label": "Single", "value": "single"},
@@ -80,6 +212,18 @@ _DEFAULT_HIDDEN = ["bid_size", "offer_size", "bought_sold"]
 
 
 # ---------------------------------------------------------------------------
+# Google Fonts link tag for web fonts
+# ---------------------------------------------------------------------------
+
+def _google_fonts_link():
+    """Return a link element to load Inter + JetBrains Mono from Google Fonts."""
+    return html.Link(
+        rel="stylesheet",
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Layout components
 # ---------------------------------------------------------------------------
 
@@ -93,7 +237,9 @@ def create_username_modal():
             "left": "0",
             "width": "100vw",
             "height": "100vh",
-            "backgroundColor": "rgba(0, 0, 0, 0.85)",
+            "backgroundColor": COLORS["bg_modal_overlay"],
+            "backdropFilter": "blur(8px)",
+            "WebkitBackdropFilter": "blur(8px)",
             "display": "flex",
             "justifyContent": "center",
             "alignItems": "center",
@@ -102,17 +248,55 @@ def create_username_modal():
         children=[
             html.Div(
                 style={
-                    "backgroundColor": "#1a1a2e",
-                    "padding": "40px",
-                    "borderRadius": "12px",
-                    "border": "1px solid #333",
+                    "backgroundColor": COLORS["bg_card"],
+                    "padding": "48px 44px",
+                    "borderRadius": "16px",
+                    "border": f"1px solid {COLORS['border_light']}",
+                    "boxShadow": "0 25px 50px -12px rgba(0, 0, 0, 0.6), 0 0 40px rgba(34, 211, 238, 0.05)",
                     "textAlign": "center",
-                    "maxWidth": "400px",
+                    "maxWidth": "420px",
                     "width": "90%",
                 },
                 children=[
-                    html.H2("Welcome", style={"color": "#00d4ff", "marginBottom": "10px"}),
-                    html.P("Enter your name to continue", style={"color": "#aaa", "marginBottom": "20px"}),
+                    # Logo/icon area
+                    html.Div(
+                        style={
+                            "width": "56px",
+                            "height": "56px",
+                            "borderRadius": "14px",
+                            "background": f"linear-gradient(135deg, {COLORS['btn_primary']}, {COLORS['text_accent']})",
+                            "display": "flex",
+                            "alignItems": "center",
+                            "justifyContent": "center",
+                            "margin": "0 auto 24px auto",
+                            "fontSize": "24px",
+                        },
+                        children=html.Span(
+                            "\u25C8",
+                            style={"color": "white", "lineHeight": "1"},
+                        ),
+                    ),
+                    html.H2(
+                        "IDB Options Pricer",
+                        style={
+                            "color": COLORS["text_heading"],
+                            "marginBottom": "6px",
+                            "fontFamily": _FONT_SANS,
+                            "fontWeight": "600",
+                            "fontSize": "22px",
+                            "letterSpacing": "-0.02em",
+                        },
+                    ),
+                    html.P(
+                        "Enter your name to continue",
+                        style={
+                            "color": COLORS["text_muted"],
+                            "marginBottom": "28px",
+                            "fontFamily": _FONT_SANS,
+                            "fontSize": "14px",
+                            "fontWeight": "400",
+                        },
+                    ),
                     dcc.Input(
                         id="username-input",
                         type="text",
@@ -123,27 +307,39 @@ def create_username_modal():
                             **_INPUT_STYLE,
                             "width": "100%",
                             "boxSizing": "border-box",
-                            "fontSize": "16px",
-                            "padding": "12px",
+                            "fontSize": "15px",
+                            "padding": "14px 16px",
                             "textAlign": "center",
+                            "lineHeight": "1.5",
+                            "height": "auto",
+                            "borderRadius": "10px",
+                            "border": f"1px solid {COLORS['border_light']}",
                         },
                     ),
                     html.Button(
-                        "Enter",
+                        "Continue",
                         id="username-submit-btn",
                         n_clicks=0,
                         style={
-                            "marginTop": "15px",
-                            "padding": "10px 40px",
-                            "fontSize": "16px",
-                            "backgroundColor": "#0d6efd",
+                            **_BTN_BASE,
+                            "marginTop": "16px",
+                            "padding": "12px 48px",
+                            "fontSize": "15px",
+                            "backgroundColor": COLORS["btn_primary"],
                             "color": "white",
-                            "border": "none",
-                            "borderRadius": "4px",
-                            "cursor": "pointer",
+                            "width": "100%",
+                            "borderRadius": "10px",
                         },
                     ),
-                    html.Div(id="username-error", style={"color": "#ff4444", "marginTop": "8px"}),
+                    html.Div(
+                        id="username-error",
+                        style={
+                            "color": COLORS["negative"],
+                            "marginTop": "12px",
+                            "fontFamily": _FONT_SANS,
+                            "fontSize": "13px",
+                        },
+                    ),
                 ],
             ),
         ],
@@ -153,25 +349,62 @@ def create_username_modal():
 def create_header():
     return html.Div(
         className="header",
-        style={"display": "flex", "justifyContent": "space-between", "alignItems": "flex-start"},
+        style={
+            "display": "flex",
+            "justifyContent": "space-between",
+            "alignItems": "center",
+            "padding": "4px 0 16px 0",
+        },
         children=[
             html.Div([
-                html.H1("IDB Options Pricer"),
-                html.P("Equity Derivatives Structure Pricing Tool"),
+                html.H1(
+                    "IDB Options Pricer",
+                    style={
+                        "fontFamily": _FONT_SANS,
+                        "fontWeight": "700",
+                        "fontSize": "26px",
+                        "color": COLORS["text_heading"],
+                        "margin": "0",
+                        "letterSpacing": "-0.03em",
+                        "lineHeight": "1.2",
+                    },
+                ),
+                html.P(
+                    "Equity Derivatives Structure Pricing",
+                    style={
+                        "fontFamily": _FONT_SANS,
+                        "fontWeight": "400",
+                        "fontSize": "13px",
+                        "color": COLORS["text_muted"],
+                        "margin": "4px 0 0 0",
+                        "letterSpacing": "0.02em",
+                    },
+                ),
             ]),
             html.Div(
                 id="user-info",
                 style={
                     "display": "flex",
                     "alignItems": "center",
-                    "gap": "12px",
-                    "fontFamily": "monospace",
+                    "gap": "10px",
+                    "fontFamily": _FONT_MONO,
                     "fontSize": "13px",
-                    "paddingTop": "10px",
                 },
                 children=[
-                    html.Span(id="user-display", style={"color": "#00d4ff"}),
-                    html.Span(id="online-count", style={"color": "#aaa"}),
+                    html.Span(
+                        id="user-display",
+                        style={
+                            "color": COLORS["text_accent"],
+                            "fontWeight": "500",
+                        },
+                    ),
+                    html.Span(
+                        id="online-count",
+                        style={
+                            "color": COLORS["text_hint"],
+                            "fontSize": "12px",
+                        },
+                    ),
                 ],
             ),
         ],
@@ -183,43 +416,67 @@ def create_order_input():
         className="order-input",
         style={"marginBottom": "20px"},
         children=[
-            html.H3("Paste Order"),
+            html.Div(
+                "PASTE ORDER",
+                style={
+                    **_LABEL_STYLE,
+                    "fontSize": "12px",
+                    "marginBottom": "8px",
+                },
+            ),
             dcc.Textarea(
                 id="order-text",
                 placeholder='e.g. AAPL Jun26 240/220 PS 1X2 vs250 15d 500x @ 3.50 1X over',
                 style={
                     "width": "100%",
                     "boxSizing": "border-box",
-                    "padding": "14px",
-                    "fontSize": "16px",
-                    "fontFamily": "monospace",
-                    "backgroundColor": "#1a1a2e",
-                    "color": "#00d4ff",
-                    "border": "1px solid #333",
-                    "borderRadius": "4px",
-                    "minHeight": "80px",
+                    "padding": "14px 16px",
+                    "fontSize": "15px",
+                    "fontFamily": _FONT_MONO,
+                    "fontWeight": "500",
+                    "backgroundColor": COLORS["bg_card"],
+                    "color": COLORS["text_accent"],
+                    "border": f"1px solid {COLORS['border_light']}",
+                    "borderRadius": "10px",
+                    "minHeight": "70px",
                     "resize": "vertical",
-                    "lineHeight": "1.5",
+                    "lineHeight": "1.6",
+                    "outline": "none",
+                    "transition": "border-color 0.2s ease, box-shadow 0.2s ease",
                 },
             ),
             # Hidden helper to relay Enter keypress from textarea
             dcc.Store(id="textarea-enter", data=0),
-            html.Button(
-                "Parse & Price",
-                id="price-btn",
-                n_clicks=0,
+            html.Div(
                 style={
+                    "display": "flex",
+                    "alignItems": "center",
+                    "gap": "12px",
                     "marginTop": "10px",
-                    "padding": "10px 30px",
-                    "fontSize": "16px",
-                    "backgroundColor": "#0d6efd",
-                    "color": "white",
-                    "border": "none",
-                    "borderRadius": "4px",
-                    "cursor": "pointer",
                 },
+                children=[
+                    html.Button(
+                        "Parse & Price",
+                        id="price-btn",
+                        n_clicks=0,
+                        style={
+                            **_BTN_BASE,
+                            "padding": "10px 28px",
+                            "fontSize": "14px",
+                            "backgroundColor": COLORS["btn_primary"],
+                            "color": "white",
+                        },
+                    ),
+                    html.Div(
+                        id="parse-error",
+                        style={
+                            "color": COLORS["negative"],
+                            "fontFamily": _FONT_MONO,
+                            "fontSize": "13px",
+                        },
+                    ),
+                ],
             ),
-            html.Div(id="parse-error", style={"color": "#ff4444", "marginTop": "8px"}),
         ],
     )
 
@@ -229,7 +486,7 @@ def create_pricer_toolbar():
     toolbar_row = html.Div(
         style={
             "display": "flex",
-            "gap": "15px",
+            "gap": "12px",
             "alignItems": "flex-end",
             "flexWrap": "wrap",
         },
@@ -285,7 +542,7 @@ def create_pricer_toolbar():
                     ],
                     value=None,
                     placeholder="Side",
-                    style={**_DROPDOWN_STYLE, "width": "90px"},
+                    style={**_DROPDOWN_STYLE, "width": "100px"},
                 ),
             ]),
             html.Div([
@@ -303,14 +560,10 @@ def create_pricer_toolbar():
                     id="add-order-btn",
                     n_clicks=0,
                     style={
-                        "padding": "8px 20px",
-                        "backgroundColor": "#198754",
+                        **_BTN_BASE,
+                        "padding": "8px 22px",
+                        "backgroundColor": COLORS["btn_success"],
                         "color": "white",
-                        "border": "none",
-                        "borderRadius": "4px",
-                        "cursor": "pointer",
-                        "fontSize": "13px",
-                        "fontFamily": "monospace",
                     },
                 ),
             ]),
@@ -318,17 +571,18 @@ def create_pricer_toolbar():
     )
     return html.Div(
         style={
-            "backgroundColor": "#1a1a2e",
-            "padding": "12px 20px",
-            "borderRadius": "6px 6px 0 0",
+            "backgroundColor": COLORS["bg_toolbar"],
+            "padding": "14px 20px",
+            "borderRadius": "10px 10px 0 0",
+            "borderBottom": f"1px solid {COLORS['border']}",
         },
         children=[
             toolbar_row,
             html.Div(
                 id="order-error",
                 style={
-                    "color": "#ff4444",
-                    "fontFamily": "monospace",
+                    "color": COLORS["negative"],
+                    "fontFamily": _FONT_MONO,
                     "fontSize": "13px",
                     "marginTop": "6px",
                 },
@@ -338,7 +592,7 @@ def create_pricer_toolbar():
 
 
 def create_pricing_table():
-    """Unified editable pricing table — input columns + output columns."""
+    """Unified editable pricing table -- input columns + output columns."""
     return html.Div(
         className="pricing-table",
         children=[
@@ -372,29 +626,40 @@ def create_pricing_table():
                         ],
                     },
                 },
-                style_table={"overflowX": "auto"},
+                css=_TABLE_DROPDOWN_CSS,
+                style_table={
+                    "overflowX": "auto",
+                    "overflowY": "visible",
+                },
                 style_cell={
                     "textAlign": "center",
-                    "padding": "8px 10px",
-                    "fontFamily": "monospace",
+                    "padding": "10px 12px",
+                    "fontFamily": _FONT_MONO,
                     "fontSize": "13px",
+                    "border": "none",
+                    "overflow": "visible",
                 },
                 style_header={
-                    "backgroundColor": "#1a1a2e",
-                    "color": "#aaa",
-                    "fontWeight": "bold",
-                    "borderBottom": "2px solid #333",
+                    "backgroundColor": COLORS["bg_toolbar"],
+                    "color": COLORS["text_muted"],
+                    "fontFamily": _FONT_SANS,
+                    "fontWeight": "600",
+                    "fontSize": "11px",
+                    "letterSpacing": "0.05em",
+                    "textTransform": "uppercase",
+                    "borderBottom": f"1px solid {COLORS['border_light']}",
+                    "padding": "10px 12px",
                 },
                 style_data={
-                    "backgroundColor": "#16213e",
-                    "color": "#e0e0e0",
-                    "borderBottom": "1px solid #1a1a2e",
+                    "backgroundColor": COLORS["bg_input"],
+                    "color": COLORS["text_primary"],
+                    "borderBottom": f"1px solid {COLORS['border']}",
                 },
                 style_cell_conditional=[
-                    # Input columns get a slightly lighter background
+                    # Editable columns get a slightly lighter background
                     {
                         "if": {"column_id": ["expiry", "strike", "type", "side", "qty"]},
-                        "backgroundColor": "#1c2a4a",
+                        "backgroundColor": COLORS["bg_input_editable"],
                     },
                     # Leg column narrower
                     {"if": {"column_id": "leg"}, "width": "70px"},
@@ -403,15 +668,15 @@ def create_pricing_table():
                 ],
                 style_data_conditional=[
                     # Color-coded pricing columns
-                    {"if": {"column_id": "bid"}, "color": "#00ff88"},
-                    {"if": {"column_id": "offer"}, "color": "#ff6b6b"},
-                    # Structure summary row (last — overrides column colors)
+                    {"if": {"column_id": "bid"}, "color": COLORS["positive"]},
+                    {"if": {"column_id": "offer"}, "color": COLORS["offer_col"]},
+                    # Structure summary row (last -- overrides column colors)
                     {
                         "if": {"filter_query": '{leg} = "Structure"'},
-                        "backgroundColor": "#0f3460",
-                        "fontWeight": "bold",
-                        "borderTop": "2px solid #00d4ff",
-                        "color": "#00d4ff",
+                        "backgroundColor": COLORS["bg_structure_row"],
+                        "fontWeight": "700",
+                        "borderTop": f"2px solid {COLORS['text_accent']}",
+                        "color": COLORS["text_accent"],
                     },
                 ],
             ),
@@ -419,42 +684,53 @@ def create_pricing_table():
             html.Div(
                 style={
                     "display": "flex",
-                    "gap": "10px",
+                    "gap": "8px",
                     "alignItems": "center",
-                    "marginTop": "10px",
+                    "padding": "12px 16px",
                     "flexWrap": "wrap",
                 },
                 children=[
                     html.Button(
                         "+ Row", id="add-row-btn", n_clicks=0,
                         style={
-                            "padding": "4px 14px", "fontSize": "12px",
-                            "backgroundColor": "#333", "color": "#aaa",
-                            "border": "1px solid #555", "borderRadius": "4px",
-                            "cursor": "pointer",
+                            **_BTN_BASE,
+                            "padding": "5px 14px",
+                            "fontSize": "12px",
+                            "backgroundColor": COLORS["btn_neutral"],
+                            "color": COLORS["text_muted"],
+                            "border": f"1px solid {COLORS['btn_neutral_border']}",
                         },
                     ),
                     html.Button(
                         "- Row", id="remove-row-btn", n_clicks=0,
                         style={
-                            "padding": "4px 14px", "fontSize": "12px",
-                            "backgroundColor": "#333", "color": "#aaa",
-                            "border": "1px solid #555", "borderRadius": "4px",
-                            "cursor": "pointer",
+                            **_BTN_BASE,
+                            "padding": "5px 14px",
+                            "fontSize": "12px",
+                            "backgroundColor": COLORS["btn_neutral"],
+                            "color": COLORS["text_muted"],
+                            "border": f"1px solid {COLORS['btn_neutral_border']}",
                         },
                     ),
                     html.Button(
                         "Clear", id="clear-btn", n_clicks=0,
                         style={
-                            "padding": "4px 14px", "fontSize": "12px",
-                            "backgroundColor": "#8b0000", "color": "#e0e0e0",
-                            "border": "1px solid #aa3333", "borderRadius": "4px",
-                            "cursor": "pointer", "marginLeft": "10px",
+                            **_BTN_BASE,
+                            "padding": "5px 14px",
+                            "fontSize": "12px",
+                            "backgroundColor": COLORS["btn_danger"],
+                            "color": COLORS["text_primary"],
+                            "border": f"1px solid {COLORS['btn_danger_border']}",
+                            "marginLeft": "8px",
                         },
                     ),
                     html.Div(
                         id="table-error",
-                        style={"color": "#ff4444", "fontFamily": "monospace", "fontSize": "13px"},
+                        style={
+                            "color": COLORS["negative"],
+                            "fontFamily": _FONT_MONO,
+                            "fontSize": "13px",
+                        },
                     ),
                 ],
             ),
@@ -467,10 +743,11 @@ def create_order_header():
     return html.Div(
         id="order-header",
         style={
-            "backgroundColor": "#1a1a2e",
-            "padding": "12px 20px",
-            "borderRadius": "6px",
-            "marginBottom": "15px",
+            "backgroundColor": COLORS["bg_card"],
+            "padding": "14px 20px",
+            "borderRadius": "10px",
+            "marginBottom": "14px",
+            "border": f"1px solid {COLORS['border_accent']}",
             "display": "none",
         },
         children=[
@@ -478,10 +755,11 @@ def create_order_header():
                 id="order-header-content",
                 style={
                     "display": "flex",
-                    "gap": "30px",
-                    "fontSize": "15px",
-                    "fontFamily": "monospace",
+                    "gap": "28px",
+                    "fontSize": "14px",
+                    "fontFamily": _FONT_MONO,
                     "flexWrap": "wrap",
+                    "alignItems": "center",
                 },
             ),
         ],
@@ -493,20 +771,24 @@ def create_broker_quote():
     return html.Div(
         id="broker-quote-section",
         style={
-            "backgroundColor": "#1a1a2e",
-            "padding": "15px 20px",
-            "borderRadius": "6px",
-            "marginTop": "15px",
+            "backgroundColor": COLORS["bg_card"],
+            "padding": "14px 20px",
+            "borderRadius": "10px",
+            "marginTop": "14px",
+            "border": f"1px solid {COLORS['border']}",
             "display": "none",
         },
         children=[
-            html.Div(id="broker-quote-content", style={"fontFamily": "monospace"}),
+            html.Div(
+                id="broker-quote-content",
+                style={"fontFamily": _FONT_MONO},
+            ),
         ],
     )
 
 
 def create_order_input_section():
-    """Hidden stub — preserves IDs that callbacks still output to."""
+    """Hidden stub -- preserves IDs that callbacks still output to."""
     return html.Div(
         id="order-input-section",
         style={"display": "none"},
@@ -518,43 +800,57 @@ def create_order_input_section():
 
 
 def create_order_blotter(initial_data=None):
-    """Order blotter table — library of all priced structures."""
+    """Order blotter table -- library of all priced structures."""
     visible_cols = [c for c in _BLOTTER_COLUMNS if c["id"] in _DEFAULT_VISIBLE]
 
     return html.Div(
         className="order-blotter",
-        style={"marginTop": "20px"},
+        style={"marginTop": "24px"},
         children=[
             # Title row with column toggle
             html.Div(
                 style={
                     "display": "flex",
                     "alignItems": "center",
-                    "gap": "10px",
-                    "marginBottom": "6px",
+                    "gap": "12px",
+                    "marginBottom": "8px",
                 },
                 children=[
-                    html.H3("Order Blotter", style={"margin": "0"}),
+                    html.H3(
+                        "Order Blotter",
+                        style={
+                            "margin": "0",
+                            "fontFamily": _FONT_SANS,
+                            "fontWeight": "600",
+                            "fontSize": "18px",
+                            "color": COLORS["text_heading"],
+                            "letterSpacing": "-0.02em",
+                        },
+                    ),
                     html.Button(
                         "Columns",
                         id="column-toggle-btn",
                         n_clicks=0,
                         title="Show/hide blotter columns",
                         style={
-                            "padding": "4px 10px",
-                            "fontSize": "12px",
-                            "backgroundColor": "#333",
-                            "color": "#aaa",
-                            "border": "1px solid #555",
-                            "borderRadius": "4px",
-                            "cursor": "pointer",
+                            **_BTN_BASE,
+                            "padding": "4px 12px",
+                            "fontSize": "11px",
+                            "backgroundColor": COLORS["btn_neutral"],
+                            "color": COLORS["text_muted"],
+                            "border": f"1px solid {COLORS['btn_neutral_border']}",
                         },
                     ),
                 ],
             ),
             html.P(
                 "Click a row to recall into pricer. Edit cells directly to update order status.",
-                style={"color": "#666", "fontSize": "11px", "margin": "0 0 6px 0"},
+                style={
+                    "color": COLORS["text_hint"],
+                    "fontSize": "12px",
+                    "fontFamily": _FONT_SANS,
+                    "margin": "0 0 10px 0",
+                },
             ),
             # Column toggle panel (hidden by default)
             html.Div(
@@ -571,16 +867,17 @@ def create_order_blotter(initial_data=None):
                         style={
                             "display": "flex",
                             "flexWrap": "wrap",
-                            "gap": "8px",
-                            "padding": "10px",
-                            "backgroundColor": "#1a1a2e",
-                            "borderRadius": "4px",
-                            "fontFamily": "monospace",
+                            "gap": "10px",
+                            "padding": "12px 14px",
+                            "backgroundColor": COLORS["bg_card"],
+                            "borderRadius": "8px",
+                            "border": f"1px solid {COLORS['border']}",
+                            "fontFamily": _FONT_MONO,
                             "fontSize": "12px",
-                            "color": "#aaa",
-                            "marginBottom": "8px",
+                            "color": COLORS["text_muted"],
+                            "marginBottom": "10px",
                         },
-                        inputStyle={"marginRight": "4px"},
+                        inputStyle={"marginRight": "5px"},
                     ),
                 ],
             ),
@@ -614,25 +911,40 @@ def create_order_blotter(initial_data=None):
                 },
                 sort_action="native",
                 sort_by=[{"column_id": "added_time", "direction": "desc"}],
-                style_table={"overflowX": "auto"},
+                css=_TABLE_DROPDOWN_CSS,
+                style_table={
+                    "overflowX": "auto",
+                    "overflowY": "visible",
+                    "borderRadius": "10px",
+                    "border": f"1px solid {COLORS['border']}",
+                },
                 style_cell={
                     "textAlign": "center",
                     "padding": "10px 14px",
-                    "fontFamily": "monospace",
+                    "fontFamily": _FONT_MONO,
                     "fontSize": "13px",
                     "cursor": "pointer",
+                    "border": "none",
+                    "overflow": "visible",
+                    "whiteSpace": "normal",
+                    "minWidth": "60px",
                 },
                 style_header={
-                    "backgroundColor": "#1a1a2e",
-                    "color": "#aaa",
-                    "fontWeight": "bold",
-                    "borderBottom": "2px solid #333",
+                    "backgroundColor": COLORS["bg_toolbar"],
+                    "color": COLORS["text_muted"],
+                    "fontFamily": _FONT_SANS,
+                    "fontWeight": "600",
+                    "fontSize": "11px",
+                    "letterSpacing": "0.05em",
+                    "textTransform": "uppercase",
+                    "borderBottom": f"1px solid {COLORS['border_light']}",
+                    "padding": "11px 14px",
                     "cursor": "default",
                 },
                 style_data={
-                    "backgroundColor": "#16213e",
-                    "color": "#e0e0e0",
-                    "borderBottom": "1px solid #1a1a2e",
+                    "backgroundColor": COLORS["bg_input"],
+                    "color": COLORS["text_primary"],
+                    "borderBottom": f"1px solid {COLORS['border']}",
                 },
                 style_cell_conditional=[
                     # Editable columns get lighter background
@@ -641,8 +953,10 @@ def create_order_blotter(initial_data=None):
                             "side", "size", "traded", "bought_sold",
                             "traded_price", "initiator",
                         ]},
-                        "backgroundColor": "#1c2a4a",
+                        "backgroundColor": COLORS["bg_input_editable"],
                     },
+                    # Structure column wider to prevent text clipping
+                    {"if": {"column_id": "structure"}, "minWidth": "160px", "whiteSpace": "normal"},
                 ],
                 style_data_conditional=[
                     # Bid/Offered coloring
@@ -651,16 +965,16 @@ def create_order_blotter(initial_data=None):
                             "filter_query": '{side} = "Bid"',
                             "column_id": "side",
                         },
-                        "color": "#00ff88",
-                        "fontWeight": "bold",
+                        "color": COLORS["positive"],
+                        "fontWeight": "600",
                     },
                     {
                         "if": {
                             "filter_query": '{side} = "Offered"',
                             "column_id": "side",
                         },
-                        "color": "#ff4444",
-                        "fontWeight": "bold",
+                        "color": COLORS["negative"],
+                        "fontWeight": "600",
                     },
                     # Bought/Sold coloring
                     {
@@ -668,39 +982,39 @@ def create_order_blotter(initial_data=None):
                             "filter_query": '{bought_sold} = "Bought"',
                             "column_id": "bought_sold",
                         },
-                        "color": "#00ff88",
-                        "fontWeight": "bold",
+                        "color": COLORS["positive"],
+                        "fontWeight": "600",
                     },
                     {
                         "if": {
                             "filter_query": '{bought_sold} = "Sold"',
                             "column_id": "bought_sold",
                         },
-                        "color": "#ff4444",
-                        "fontWeight": "bold",
+                        "color": COLORS["negative"],
+                        "fontWeight": "600",
                     },
-                    # PnL coloring — PnL values are formatted as "+1,500" / "-2,300"
+                    # PnL coloring
                     {
                         "if": {
                             "filter_query": '{pnl} contains "-"',
                             "column_id": "pnl",
                         },
-                        "color": "#ff4444",
-                        "fontWeight": "bold",
+                        "color": COLORS["negative"],
+                        "fontWeight": "600",
                     },
                     {
                         "if": {
                             "filter_query": '{pnl} contains "+"',
                             "column_id": "pnl",
                         },
-                        "color": "#00ff88",
-                        "fontWeight": "bold",
+                        "color": COLORS["positive"],
+                        "fontWeight": "600",
                     },
                     # Active row highlight
                     {
                         "if": {"state": "active"},
-                        "backgroundColor": "#1a3a5e",
-                        "border": "1px solid #00d4ff",
+                        "backgroundColor": COLORS["bg_active_row"],
+                        "border": f"1px solid {COLORS['border_glow']}",
                     },
                 ],
             ),
@@ -723,16 +1037,18 @@ def create_layout():
 
     return html.Div(
         style={
-            "fontFamily": "'Segoe UI', Tahoma, sans-serif",
-            "backgroundColor": "#0f0f23",
-            "color": "#e0e0e0",
+            "fontFamily": _FONT_SANS,
+            "backgroundColor": COLORS["bg_page"],
+            "color": COLORS["text_primary"],
             "minHeight": "100vh",
-            "padding": "20px 20px 80px 20px",
+            "padding": "24px 28px 80px 28px",
             "maxWidth": "1400px",
             "margin": "0 auto",
             "boxSizing": "border-box",
         },
         children=[
+            # Load web fonts
+            _google_fonts_link(),
             # Username modal (blocking overlay until name entered)
             create_username_modal(),
             # Session data stores
@@ -748,14 +1064,21 @@ def create_layout():
             # Fallback polling interval for blotter sync (every 5s)
             dcc.Interval(id="blotter-poll", interval=5000, n_intervals=0),
             create_header(),
-            html.Hr(style={"borderColor": "#333"}),
+            # Subtle divider
+            html.Div(
+                style={
+                    "height": "1px",
+                    "background": f"linear-gradient(90deg, transparent, {COLORS['border_light']}, transparent)",
+                    "margin": "0 0 20px 0",
+                },
+            ),
             create_order_input(),
             # Toolbar + table grouped as one card
             html.Div(
                 style={
-                    "backgroundColor": "#16213e",
-                    "borderRadius": "8px",
-                    "border": "1px solid #333",
+                    "backgroundColor": COLORS["bg_input"],
+                    "borderRadius": "10px",
+                    "border": f"1px solid {COLORS['border']}",
                     "overflow": "visible",
                 },
                 children=[
@@ -766,7 +1089,14 @@ def create_layout():
             create_order_header(),
             create_broker_quote(),
             create_order_input_section(),
-            html.Hr(style={"borderColor": "#333", "marginTop": "20px"}),
+            # Subtle divider
+            html.Div(
+                style={
+                    "height": "1px",
+                    "background": f"linear-gradient(90deg, transparent, {COLORS['border_light']}, transparent)",
+                    "margin": "24px 0 0 0",
+                },
+            ),
             create_order_blotter(initial_data=blotter_data),
         ],
     )
