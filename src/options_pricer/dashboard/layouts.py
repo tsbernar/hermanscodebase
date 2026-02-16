@@ -23,7 +23,7 @@ COLORS = {
     # Text
     "text_primary": "#e2e8f0",
     "text_muted": "#94a3b8",
-    "text_hint": "#4a5568",
+    "text_hint": "#64748b",
     "text_accent": "#22d3ee",
     "text_heading": "#f1f5f9",
 
@@ -92,6 +92,15 @@ _BTN_BASE = {
     "cursor": "pointer",
     "transition": "all 0.15s ease",
     "letterSpacing": "0.02em",
+}
+
+_BTN_NEUTRAL_SM = {
+    **_BTN_BASE,
+    "padding": "5px 14px",
+    "fontSize": "12px",
+    "backgroundColor": COLORS["btn_neutral"],
+    "color": COLORS["text_muted"],
+    "border": f"1px solid {COLORS['btn_neutral_border']}",
 }
 
 # CSS rules for DataTable dropdown cells
@@ -180,11 +189,20 @@ def _make_empty_rows(n: int = 2) -> list[dict]:
     return [{**_EMPTY_ROW, "leg": f"Leg {i + 1}"} for i in range(n)]
 
 
+def _to_blotter_rows(orders: list[dict]) -> list[dict]:
+    """Convert order store list to display rows (strip _ fields, add delete icon)."""
+    return [
+        {"delete": "\u2715", **{k: v for k, v in o.items() if not k.startswith("_")}}
+        for o in orders
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Order Blotter column definitions
 # ---------------------------------------------------------------------------
 
 _BLOTTER_COLUMNS = [
+    {"name": "", "id": "delete", "editable": False},
     {"name": "Time", "id": "added_time", "editable": False},
     {"name": "User", "id": "created_by", "editable": False},
     {"name": "Underlying", "id": "underlying", "editable": False},
@@ -204,7 +222,7 @@ _BLOTTER_COLUMNS = [
 ]
 
 _DEFAULT_VISIBLE = [
-    "added_time", "created_by", "underlying", "structure", "bid", "mid", "offer",
+    "delete", "added_time", "created_by", "underlying", "structure", "bid", "mid", "offer",
     "side", "size", "traded", "traded_price", "initiator", "pnl",
 ]
 
@@ -227,24 +245,27 @@ def _google_fonts_link():
 # Layout components
 # ---------------------------------------------------------------------------
 
+_MODAL_OVERLAY_STYLE = {
+    "position": "fixed",
+    "top": "0",
+    "left": "0",
+    "width": "100vw",
+    "height": "100vh",
+    "backgroundColor": COLORS["bg_modal_overlay"],
+    "backdropFilter": "blur(8px)",
+    "WebkitBackdropFilter": "blur(8px)",
+    "display": "flex",
+    "justifyContent": "center",
+    "alignItems": "center",
+    "zIndex": "9999",
+}
+
+
 def create_username_modal():
     """Full-screen blocking modal for username entry on first load."""
     return html.Div(
         id="username-modal",
-        style={
-            "position": "fixed",
-            "top": "0",
-            "left": "0",
-            "width": "100vw",
-            "height": "100vh",
-            "backgroundColor": COLORS["bg_modal_overlay"],
-            "backdropFilter": "blur(8px)",
-            "WebkitBackdropFilter": "blur(8px)",
-            "display": "flex",
-            "justifyContent": "center",
-            "alignItems": "center",
-            "zIndex": "9999",
-        },
+        style=_MODAL_OVERLAY_STYLE,
         children=[
             html.Div(
                 style={
@@ -391,6 +412,20 @@ def create_header():
                     "fontSize": "13px",
                 },
                 children=[
+                    # Online count pill
+                    html.Span(
+                        id="online-count",
+                        children="0 online",
+                        style={
+                            "color": COLORS["text_muted"],
+                            "fontSize": "12px",
+                            "backgroundColor": COLORS["bg_card"],
+                            "border": f"1px solid {COLORS['border_light']}",
+                            "borderRadius": "12px",
+                            "padding": "3px 10px",
+                        },
+                    ),
+                    # Username display
                     html.Span(
                         id="user-display",
                         style={
@@ -398,11 +433,20 @@ def create_header():
                             "fontWeight": "500",
                         },
                     ),
-                    html.Span(
-                        id="online-count",
+                    # Change user button
+                    html.Button(
+                        "\u270E",
+                        id="change-user-btn",
+                        n_clicks=0,
+                        title="Change username",
                         style={
+                            **_BTN_BASE,
+                            "padding": "2px 7px",
+                            "fontSize": "13px",
+                            "backgroundColor": "transparent",
                             "color": COLORS["text_hint"],
-                            "fontSize": "12px",
+                            "border": "none",
+                            "lineHeight": "1",
                         },
                     ),
                 ],
@@ -692,25 +736,11 @@ def create_pricing_table():
                 children=[
                     html.Button(
                         "+ Row", id="add-row-btn", n_clicks=0,
-                        style={
-                            **_BTN_BASE,
-                            "padding": "5px 14px",
-                            "fontSize": "12px",
-                            "backgroundColor": COLORS["btn_neutral"],
-                            "color": COLORS["text_muted"],
-                            "border": f"1px solid {COLORS['btn_neutral_border']}",
-                        },
+                        style=_BTN_NEUTRAL_SM,
                     ),
                     html.Button(
                         "- Row", id="remove-row-btn", n_clicks=0,
-                        style={
-                            **_BTN_BASE,
-                            "padding": "5px 14px",
-                            "fontSize": "12px",
-                            "backgroundColor": COLORS["btn_neutral"],
-                            "color": COLORS["text_muted"],
-                            "border": f"1px solid {COLORS['btn_neutral_border']}",
-                        },
+                        style=_BTN_NEUTRAL_SM,
                     ),
                     html.Button(
                         "Clear", id="clear-btn", n_clicks=0,
@@ -862,6 +892,7 @@ def create_order_blotter(initial_data=None):
                         options=[
                             {"label": c["name"], "value": c["id"]}
                             for c in _BLOTTER_COLUMNS
+                            if c["id"] != "delete"
                         ],
                         value=_DEFAULT_VISIBLE,
                         style={
@@ -883,6 +914,102 @@ def create_order_blotter(initial_data=None):
             ),
             # Store for visible column IDs
             dcc.Store(id="visible-columns", data=_DEFAULT_VISIBLE),
+            # Store for pending delete order ID
+            dcc.Store(id="pending-delete-id", data=None),
+            # Delete confirmation modal
+            html.Div(
+                id="delete-confirm-modal",
+                style={"display": "none"},
+                children=[
+                    html.Div(
+                        style={
+                            "position": "fixed",
+                            "top": "0",
+                            "left": "0",
+                            "width": "100vw",
+                            "height": "100vh",
+                            "backgroundColor": COLORS["bg_modal_overlay"],
+                            "backdropFilter": "blur(4px)",
+                            "WebkitBackdropFilter": "blur(4px)",
+                            "display": "flex",
+                            "justifyContent": "center",
+                            "alignItems": "center",
+                            "zIndex": "9998",
+                        },
+                        children=[
+                            html.Div(
+                                style={
+                                    "backgroundColor": COLORS["bg_card"],
+                                    "padding": "32px 36px",
+                                    "borderRadius": "12px",
+                                    "border": f"1px solid {COLORS['btn_danger_border']}",
+                                    "boxShadow": "0 25px 50px -12px rgba(0, 0, 0, 0.6)",
+                                    "textAlign": "center",
+                                    "maxWidth": "380px",
+                                    "width": "90%",
+                                },
+                                children=[
+                                    html.Div(
+                                        "Delete Order",
+                                        style={
+                                            "color": COLORS["negative"],
+                                            "fontFamily": _FONT_SANS,
+                                            "fontWeight": "600",
+                                            "fontSize": "18px",
+                                            "marginBottom": "8px",
+                                        },
+                                    ),
+                                    html.Div(
+                                        id="delete-confirm-detail",
+                                        style={
+                                            "color": COLORS["text_muted"],
+                                            "fontFamily": _FONT_MONO,
+                                            "fontSize": "13px",
+                                            "marginBottom": "24px",
+                                            "lineHeight": "1.5",
+                                        },
+                                    ),
+                                    html.Div(
+                                        style={
+                                            "display": "flex",
+                                            "gap": "10px",
+                                            "justifyContent": "center",
+                                        },
+                                        children=[
+                                            html.Button(
+                                                "Cancel",
+                                                id="delete-cancel-btn",
+                                                n_clicks=0,
+                                                style={
+                                                    **_BTN_BASE,
+                                                    "padding": "10px 28px",
+                                                    "fontSize": "14px",
+                                                    "backgroundColor": COLORS["btn_neutral"],
+                                                    "color": COLORS["text_muted"],
+                                                    "border": f"1px solid {COLORS['btn_neutral_border']}",
+                                                },
+                                            ),
+                                            html.Button(
+                                                "Delete",
+                                                id="delete-confirm-btn",
+                                                n_clicks=0,
+                                                style={
+                                                    **_BTN_BASE,
+                                                    "padding": "10px 28px",
+                                                    "fontSize": "14px",
+                                                    "backgroundColor": COLORS["btn_danger"],
+                                                    "color": COLORS["text_primary"],
+                                                    "border": f"1px solid {COLORS['btn_danger_border']}",
+                                                },
+                                            ),
+                                        ],
+                                    ),
+                                ],
+                            ),
+                        ],
+                    ),
+                ],
+            ),
             # The blotter DataTable
             dash_table.DataTable(
                 id="blotter-table",
@@ -947,6 +1074,15 @@ def create_order_blotter(initial_data=None):
                     "borderBottom": f"1px solid {COLORS['border']}",
                 },
                 style_cell_conditional=[
+                    # Delete column: narrow, no-sort icon
+                    {
+                        "if": {"column_id": "delete"},
+                        "width": "36px",
+                        "minWidth": "36px",
+                        "maxWidth": "36px",
+                        "padding": "0",
+                        "cursor": "pointer",
+                    },
                     # Editable columns get lighter background
                     {
                         "if": {"column_id": [
@@ -1010,6 +1146,12 @@ def create_order_blotter(initial_data=None):
                         "color": COLORS["positive"],
                         "fontWeight": "600",
                     },
+                    # Delete column styling
+                    {
+                        "if": {"column_id": "delete"},
+                        "color": COLORS["text_hint"],
+                        "fontSize": "15px",
+                    },
                     # Active row highlight
                     {
                         "if": {"state": "active"},
@@ -1030,10 +1172,7 @@ def create_layout():
     """
     # Load persisted orders from SQLite
     orders = load_orders()
-    blotter_data = [
-        {k: v for k, v in o.items() if not k.startswith("_")}
-        for o in orders
-    ]
+    blotter_data = _to_blotter_rows(orders)
 
     return html.Div(
         style={
@@ -1042,8 +1181,7 @@ def create_layout():
             "color": COLORS["text_primary"],
             "minHeight": "100vh",
             "padding": "24px 28px 80px 28px",
-            "maxWidth": "1400px",
-            "margin": "0 auto",
+            "width": "100%",
             "boxSizing": "border-box",
         },
         children=[

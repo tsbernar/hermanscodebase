@@ -9,10 +9,15 @@ Multi-user architecture:
 
 import logging
 import re
+import threading
+import time
 import uuid
+from collections import deque
 from datetime import date, datetime
 
 from dash import Dash, Input, Output, State, callback, ctx, html, no_update
+from flask import jsonify
+from flask import request as flask_request
 from flask_socketio import SocketIO, emit
 
 from ..bloomberg import create_client
@@ -28,12 +33,15 @@ from ..models import (
 from ..order_store import load_orders as store_load_orders
 from ..order_store import save_orders as store_save_orders
 from ..parser import parse_expiry, parse_order
+from ..settings import DASHBOARD_DEBUG, DASHBOARD_HOST, DASHBOARD_PORT, MAX_USERS
 from ..structure_pricer import price_structure_from_market
 from .layouts import (
     COLORS,
     _BLOTTER_COLUMNS,
     _EMPTY_ROW,
+    _MODAL_OVERLAY_STYLE,
     _make_empty_rows,
+    _to_blotter_rows,
     create_layout,
 )
 
@@ -42,41 +50,117 @@ logger = logging.getLogger(__name__)
 app = Dash(
     __name__,
     suppress_callback_exceptions=True,
-    external_scripts=["/socket.io/socket.io.js"],
+    external_scripts=["https://cdn.socket.io/4.7.5/socket.io.min.js"],
 )
 app.title = "IDB Options Pricer"
+
+# Set body/html background so no white bars appear at any viewport width
+app.index_string = '''<!DOCTYPE html>
+<html>
+    <head>
+        {%metas%}
+        <title>{%title%}</title>
+        {%favicon%}
+        {%css%}
+        <style>
+            html, body {
+                background-color: ''' + COLORS["bg_page"] + ''';
+                margin: 0;
+                padding: 0;
+            }
+        </style>
+    </head>
+    <body>
+        {%app_entry%}
+        <footer>
+            {%config%}
+            {%scripts%}
+            {%renderer%}
+        </footer>
+    </body>
+</html>'''
+
 app.layout = create_layout  # callable — Dash invokes per page load
 
 # Flask-SocketIO for multi-user live updates
 socketio = SocketIO(app.server, cors_allowed_origins="*", async_mode="threading")
 
-# Track connected users
-_connected_users: set[str] = set()
+# Track connected users (sid -> username)
+_connected_users: dict[str, str] = {}
 
 
 @socketio.on("connect")
 def handle_connect():
+    # Send current count immediately so client doesn't show stale "0 online"
+    emit("user_count", {"count": len(_connected_users) + 1})
     logger.info("WebSocket client connected")
 
 
 @socketio.on("disconnect")
 def handle_disconnect():
-    # Clean up on disconnect — client sends username via register event
-    sid = getattr(handle_disconnect, "_request_sid", None)
-    _connected_users.discard(str(sid))
+    removed = _connected_users.pop(flask_request.sid, None)
     socketio.emit("user_count", {"count": len(_connected_users)}, to="/")
-    logger.info("WebSocket client disconnected (%d online)", len(_connected_users))
+    logger.info("User '%s' disconnected (%d online)", removed or "?", len(_connected_users))
 
 
 @socketio.on("register")
 def handle_register(data):
-    """Client sends username after modal submit."""
-    from flask import request
+    """Client sends username after modal submit. Reject if at capacity."""
     username = (data.get("username") or "").strip()
-    if username:
-        _connected_users.add(request.sid)
+    if not username:
+        return
+
+    sid = flask_request.sid
+
+    # Allow if this SID is already registered (re-register)
+    if sid in _connected_users:
+        _connected_users[sid] = username
+        socketio.emit("user_count", {"count": len(_connected_users)}, to="/")
+        return
+
+    if len(_connected_users) >= MAX_USERS:
+        emit("server_full", {"message": f"Server full ({MAX_USERS} users max). Try again later."})
+        logger.warning("Rejected user '%s' — server full (%d/%d)", username, len(_connected_users), MAX_USERS)
+        return
+
+    _connected_users[sid] = username
     socketio.emit("user_count", {"count": len(_connected_users)}, to="/")
     logger.info("User '%s' registered (%d online)", username, len(_connected_users))
+
+
+# ---------------------------------------------------------------------------
+# Global rate limiter — 15 actions/second across all users
+# ---------------------------------------------------------------------------
+
+class _GlobalRateLimiter:
+    """Thread-safe sliding window rate limiter."""
+
+    def __init__(self, max_requests: int, window: float = 1.0):
+        self.max_requests = max_requests
+        self.window = window
+        self._timestamps: deque[float] = deque()
+        self._lock = threading.Lock()
+
+    def allow(self) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            while self._timestamps and self._timestamps[0] < now - self.window:
+                self._timestamps.popleft()
+            if len(self._timestamps) >= self.max_requests:
+                return False
+            self._timestamps.append(now)
+            return True
+
+
+_rate_limiter = _GlobalRateLimiter(max_requests=15)
+
+
+@app.server.before_request
+def _check_rate_limit():
+    """Rate-limit Dash callback requests to 15/sec globally."""
+    if flask_request.path == "/_dash-update-component":
+        if not _rate_limiter.allow():
+            return jsonify({"error": "Rate limit exceeded. Try again shortly."}), 429
 
 
 # Clientside callback: Enter key in textarea triggers pricing
@@ -131,37 +215,39 @@ app.clientside_callback(
     function(username) {
         if (!username) return [window.dash_clientside.no_update, window.dash_clientside.no_update];
 
-        // Only connect once per session
-        if (!window._sio) {
-            var sio = io();
-            window._sio = sio;
+        try {
+            // Only connect once per session
+            if (!window._sio && typeof io !== 'undefined') {
+                var sio = io();
+                window._sio = sio;
 
-            sio.on('connect', function() {
-                sio.emit('register', {username: username});
-            });
+                sio.on('connect', function() {
+                    sio.emit('register', {username: username});
+                });
 
-            sio.on('blotter_changed', function(data) {
-                // Increment the refresh counter to trigger Dash callback
-                var store = document.getElementById("ws-blotter-refresh");
-                if (store) {
-                    var evt = new Event("ws_update");
-                    store.dispatchEvent(evt);
-                }
-                // Use setProps via Dash internals
-                var el = document.getElementById("ws-blotter-refresh");
-                if (el && el._dashprivate_isSimpleComponent !== undefined) {
-                    // fallback: we rely on the polling interval
-                }
-            });
+                sio.on('blotter_changed', function(data) {
+                    // fallback polling will pick up changes
+                });
 
-            sio.on('user_count', function(data) {
-                var el = document.getElementById("online-count");
-                if (el) el.textContent = "(" + data.count + " online)";
-            });
-        } else {
-            // Re-register if username changed
-            window._sio.emit('register', {username: username});
+                sio.on('user_count', function(data) {
+                    var el = document.getElementById("online-count");
+                    if (el) el.textContent = data.count + " online";
+                });
+
+                sio.on('server_full', function(data) {
+                    var modal = document.getElementById("username-modal");
+                    if (modal) modal.style.display = "flex";
+                    var err = document.getElementById("username-error");
+                    if (err) err.textContent = data.message || "Server full.";
+                });
+            } else if (window._sio) {
+                // Re-register if username changed
+                window._sio.emit('register', {username: username});
+            }
+        } catch(e) {
+            console.warn("SocketIO setup failed:", e);
         }
+
         return [username, window.dash_clientside.no_update];
     }
     """,
@@ -185,7 +271,7 @@ _HEADER_VISIBLE_STYLE = {
     "padding": "14px 20px",
     "borderRadius": "10px",
     "marginBottom": "14px",
-    "border": f"1px solid rgba(34, 211, 238, 0.15)",
+    "border": f"1px solid {COLORS['border_accent']}",
     "display": "block",
 }
 
@@ -351,10 +437,8 @@ def _build_header_and_extras(order, spot, struct_data, multiplier):
     if order.stock_ref > 0:
         header_items.append(html.Span(f"Tie: ${order.stock_ref:.2f}"))
     header_items.append(html.Span(f"Stock: ${spot:.2f}"))
-    if order.delta > 0:
-        header_items.append(html.Span(f"Delta: +{order.delta:.0f}"))
-    elif order.delta < 0:
-        header_items.append(html.Span(f"Delta: {order.delta:.0f}"))
+    if order.delta != 0:
+        header_items.append(html.Span(f"Delta: {order.delta:+.0f}"))
 
     broker_style = _HIDDEN
     broker_content = []
@@ -787,13 +871,79 @@ def add_order(n_clicks, current_data, existing_orders, current_user,
     # Broadcast to other clients via WebSocket
     socketio.emit("blotter_changed", {"action": "added"}, to="/")
 
-    # Build display rows (strip underscore fields)
-    blotter_rows = [
-        {k: v for k, v in o.items() if not k.startswith("_")}
-        for o in orders
-    ]
+    return _to_blotter_rows(orders), orders, "", None, None, True
 
-    return blotter_rows, orders, "", None, None, True
+
+# ---------------------------------------------------------------------------
+# Callback: show delete confirmation modal when X column is clicked
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output("delete-confirm-modal", "style"),
+    Output("pending-delete-id", "data"),
+    Output("delete-confirm-detail", "children"),
+    Input("blotter-table", "active_cell"),
+    State("blotter-table", "data"),
+    prevent_initial_call=True,
+)
+def show_delete_modal(active_cell, blotter_data):
+    """Show confirmation modal when user clicks the X column."""
+    if not active_cell or not blotter_data:
+        return no_update, no_update, no_update
+
+    # Only trigger on the delete column
+    if active_cell.get("column_id") != "delete":
+        return {"display": "none"}, None, ""
+
+    row_idx = active_cell["row"]
+    if row_idx >= len(blotter_data):
+        return no_update, no_update, no_update
+
+    row = blotter_data[row_idx]
+    order_id = row.get("id")
+    if not order_id:
+        return no_update, no_update, no_update
+
+    detail = f"{row.get('underlying', '')} {row.get('structure', '')}"
+    return {"display": "block"}, order_id, detail
+
+
+@callback(
+    Output("blotter-table", "data", allow_duplicate=True),
+    Output("order-store", "data", allow_duplicate=True),
+    Output("delete-confirm-modal", "style", allow_duplicate=True),
+    Output("pending-delete-id", "data", allow_duplicate=True),
+    Output("blotter-edit-suppress", "data", allow_duplicate=True),
+    Input("delete-confirm-btn", "n_clicks"),
+    State("pending-delete-id", "data"),
+    State("order-store", "data"),
+    prevent_initial_call=True,
+)
+def confirm_delete_order(n_clicks, pending_id, orders):
+    """Actually delete the order after user confirms."""
+    if not pending_id or not orders:
+        return no_update, no_update, {"display": "none"}, None, no_update
+
+    updated_orders = [o for o in orders if o.get("id") != pending_id]
+
+    # Persist to SQLite
+    store_save_orders(updated_orders)
+
+    # Broadcast to other clients
+    socketio.emit("blotter_changed", {"action": "deleted"}, to="/")
+
+    return _to_blotter_rows(updated_orders), updated_orders, {"display": "none"}, None, True
+
+
+@callback(
+    Output("delete-confirm-modal", "style", allow_duplicate=True),
+    Output("pending-delete-id", "data", allow_duplicate=True),
+    Input("delete-cancel-btn", "n_clicks"),
+    prevent_initial_call=True,
+)
+def cancel_delete_order(n_clicks):
+    """Hide the delete confirmation modal."""
+    return {"display": "none"}, None
 
 
 # ---------------------------------------------------------------------------
@@ -871,13 +1021,7 @@ def sync_blotter_edits(data_ts, blotter_data, orders, suppress):
     # Broadcast to other clients via WebSocket
     socketio.emit("blotter_changed", {"action": "updated"}, to="/")
 
-    # Build display rows
-    display_rows = [
-        {k: v for k, v in o.items() if not k.startswith("_")}
-        for o in updated_orders
-    ]
-
-    return updated_orders, display_rows, True
+    return updated_orders, _to_blotter_rows(updated_orders), True
 
 
 # ---------------------------------------------------------------------------
@@ -907,7 +1051,10 @@ def toggle_column_panel(n_clicks, current_style):
     prevent_initial_call=True,
 )
 def update_visible_columns(selected_columns):
-    visible = [c for c in _BLOTTER_COLUMNS if c["id"] in selected_columns]
+    # Always include the delete column first, then user-selected columns
+    visible = [_BLOTTER_COLUMNS[0]] + [
+        c for c in _BLOTTER_COLUMNS[1:] if c["id"] in selected_columns
+    ]
     return visible, selected_columns
 
 
@@ -939,6 +1086,10 @@ def update_visible_columns(selected_columns):
 )
 def recall_order(active_cell, blotter_data, orders):
     if not active_cell or not orders or not blotter_data:
+        return (no_update,) * 16
+
+    # Ignore clicks on the delete column (handled by show_delete_modal)
+    if active_cell.get("column_id") == "delete":
         return (no_update,) * 16
 
     row_idx = active_cell["row"]
@@ -1027,21 +1178,20 @@ def recall_order(active_cell, blotter_data, orders):
     Output("username-modal", "style"),
     Output("current-user", "data"),
     Output("username-error", "children", allow_duplicate=True),
+    Output("online-count", "children", allow_duplicate=True),
     Input("username-submit-btn", "n_clicks"),
     State("username-input", "value"),
     State("current-user", "data"),
     prevent_initial_call=True,
 )
 def submit_username(n_clicks, username_input, existing_user):
-    if existing_user:
-        # Already logged in (session store persists across refreshes)
-        return {"display": "none"}, existing_user, ""
-
     name = (username_input or "").strip()
     if not name:
-        return no_update, no_update, "Please enter your name."
+        return no_update, no_update, "Please enter your name.", no_update
 
-    return {"display": "none"}, name, ""
+    # +1 because this user's WebSocket register hasn't fired yet
+    count = len(_connected_users) + (1 if not existing_user else 0)
+    return {"display": "none"}, name, "", f"{count} online"
 
 
 # ---------------------------------------------------------------------------
@@ -1087,16 +1237,43 @@ def poll_blotter_updates(n_intervals, current_orders):
         # Also check if any data changed (compare serialized form)
         return no_update, no_update, no_update
 
-    blotter_rows = [
-        {k: v for k, v in o.items() if not k.startswith("_")}
-        for o in fresh_orders
-    ]
-    return blotter_rows, fresh_orders, True
+    return _to_blotter_rows(fresh_orders), fresh_orders, True
+
+
+# ---------------------------------------------------------------------------
+# Callback: update online count via poll (reliable server-side fallback)
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output("online-count", "children"),
+    Input("blotter-poll", "n_intervals"),
+    State("current-user", "data"),
+    prevent_initial_call=True,
+)
+def update_online_count(n_intervals, current_user):
+    count = len(_connected_users)
+    if current_user:
+        count = max(count, 1)
+    return f"{count} online"
+
+
+# ---------------------------------------------------------------------------
+# Callback: change username — re-show the modal
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output("username-modal", "style", allow_duplicate=True),
+    Output("username-input", "value"),
+    Input("change-user-btn", "n_clicks"),
+    State("current-user", "data"),
+    prevent_initial_call=True,
+)
+def change_username(n_clicks, current_user):
+    return _MODAL_OVERLAY_STYLE, current_user or ""
 
 
 def main():
     """Run the dashboard with SocketIO for multi-user support."""
-    from ..settings import DASHBOARD_DEBUG, DASHBOARD_HOST, DASHBOARD_PORT
     socketio.run(
         app.server,
         host=DASHBOARD_HOST,

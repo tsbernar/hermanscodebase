@@ -86,7 +86,7 @@ python -m options_pricer.dashboard.app # Launch dashboard at http://127.0.0.1:80
 ## UI Rules (MUST follow when editing layouts.py or any dashboard styling)
 - **No content cutoff:** Never use `overflow: hidden` on containers that hold interactive content (toolbars, tables, inputs, dropdowns). Use `overflow: visible` or `overflow: auto` instead.
 - **Box sizing:** All elements with `width: 100%` must also set `boxSizing: border-box` so padding/border don't cause overflow.
-- **Max width:** The main layout container uses `maxWidth: 1400px`. Do not shrink this without good reason.
+- **Full width:** The main layout is fluid (`width: 100%`) — it fills the viewport. The body background is set via `app.index_string` to match `bg_page` so no white bars appear at any viewport size.
 - **Text inputs that may contain long strings:** Use `dcc.Textarea` (not `dcc.Input`) so text wraps visibly. Set `minHeight: 80px`, `resize: vertical`, `lineHeight: 1.5`, and `boxSizing: border-box`. `dcc.Input` is single-line and clips long text — never use it for order/paste fields.
 - **Enter key on Textarea:** `dcc.Textarea` does not support `n_submit`. Use a clientside callback that binds a `keydown` listener and calls `btn.click()` on Enter (see `app.py` for the pattern). Shift+Enter should still allow newlines.
 - **Dropdowns in tables:** Dash DataTable dropdown columns can clip inside tight containers — ensure parent has `overflow: visible`.
