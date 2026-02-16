@@ -1,10 +1,24 @@
-"""Dash web app entry point for the IDB options pricer dashboard."""
+"""Dash web app entry point for the IDB options pricer dashboard.
 
+Multi-user architecture:
+- Username modal blocks UI until user enters a name (stored in session)
+- Orders include `created_by` field showing which user added them
+- Flask-SocketIO broadcasts blotter changes to all connected clients
+- dcc.Interval provides fallback polling if WebSocket disconnects
+"""
+
+import logging
 import re
+import threading
+import time
 import uuid
+from collections import deque
 from datetime import date, datetime
 
 from dash import Dash, Input, Output, State, callback, ctx, html, no_update
+from flask import jsonify
+from flask import request as flask_request
+from flask_socketio import SocketIO, emit
 
 from ..bloomberg import create_client
 from ..models import (
@@ -16,20 +30,138 @@ from ..models import (
     QuoteSide,
     Side,
 )
-from ..order_store import add_order as store_add_order
+from ..order_store import load_orders as store_load_orders
 from ..order_store import save_orders as store_save_orders
 from ..parser import parse_expiry, parse_order
+from ..settings import DASHBOARD_DEBUG, DASHBOARD_HOST, DASHBOARD_PORT, MAX_USERS
 from ..structure_pricer import price_structure_from_market
 from .layouts import (
+    COLORS,
     _BLOTTER_COLUMNS,
     _EMPTY_ROW,
+    _MODAL_OVERLAY_STYLE,
     _make_empty_rows,
+    _to_blotter_rows,
     create_layout,
 )
 
-app = Dash(__name__, suppress_callback_exceptions=True)
+logger = logging.getLogger(__name__)
+
+app = Dash(
+    __name__,
+    suppress_callback_exceptions=True,
+    external_scripts=["https://cdn.socket.io/4.7.5/socket.io.min.js"],
+)
 app.title = "IDB Options Pricer"
+
+# Set body/html background so no white bars appear at any viewport width
+app.index_string = '''<!DOCTYPE html>
+<html>
+    <head>
+        {%metas%}
+        <title>{%title%}</title>
+        {%favicon%}
+        {%css%}
+        <style>
+            html, body {
+                background-color: ''' + COLORS["bg_page"] + ''';
+                margin: 0;
+                padding: 0;
+            }
+        </style>
+    </head>
+    <body>
+        {%app_entry%}
+        <footer>
+            {%config%}
+            {%scripts%}
+            {%renderer%}
+        </footer>
+    </body>
+</html>'''
+
 app.layout = create_layout  # callable — Dash invokes per page load
+
+# Flask-SocketIO for multi-user live updates
+socketio = SocketIO(app.server, cors_allowed_origins="*", async_mode="threading")
+
+# Track connected users (sid -> username)
+_connected_users: dict[str, str] = {}
+
+
+@socketio.on("connect")
+def handle_connect():
+    # Send current count immediately so client doesn't show stale "0 online"
+    emit("user_count", {"count": len(_connected_users) + 1})
+    logger.info("WebSocket client connected")
+
+
+@socketio.on("disconnect")
+def handle_disconnect():
+    removed = _connected_users.pop(flask_request.sid, None)
+    socketio.emit("user_count", {"count": len(_connected_users)}, to="/")
+    logger.info("User '%s' disconnected (%d online)", removed or "?", len(_connected_users))
+
+
+@socketio.on("register")
+def handle_register(data):
+    """Client sends username after modal submit. Reject if at capacity."""
+    username = (data.get("username") or "").strip()
+    if not username:
+        return
+
+    sid = flask_request.sid
+
+    # Allow if this SID is already registered (re-register)
+    if sid in _connected_users:
+        _connected_users[sid] = username
+        socketio.emit("user_count", {"count": len(_connected_users)}, to="/")
+        return
+
+    if len(_connected_users) >= MAX_USERS:
+        emit("server_full", {"message": f"Server full ({MAX_USERS} users max). Try again later."})
+        logger.warning("Rejected user '%s' — server full (%d/%d)", username, len(_connected_users), MAX_USERS)
+        return
+
+    _connected_users[sid] = username
+    socketio.emit("user_count", {"count": len(_connected_users)}, to="/")
+    logger.info("User '%s' registered (%d online)", username, len(_connected_users))
+
+
+# ---------------------------------------------------------------------------
+# Global rate limiter — 15 actions/second across all users
+# ---------------------------------------------------------------------------
+
+class _GlobalRateLimiter:
+    """Thread-safe sliding window rate limiter."""
+
+    def __init__(self, max_requests: int, window: float = 1.0):
+        self.max_requests = max_requests
+        self.window = window
+        self._timestamps: deque[float] = deque()
+        self._lock = threading.Lock()
+
+    def allow(self) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            while self._timestamps and self._timestamps[0] < now - self.window:
+                self._timestamps.popleft()
+            if len(self._timestamps) >= self.max_requests:
+                return False
+            self._timestamps.append(now)
+            return True
+
+
+_rate_limiter = _GlobalRateLimiter(max_requests=15)
+
+
+@app.server.before_request
+def _check_rate_limit():
+    """Rate-limit Dash callback requests to 15/sec globally."""
+    if flask_request.path == "/_dash-update-component":
+        if not _rate_limiter.allow():
+            return jsonify({"error": "Rate limit exceeded. Try again shortly."}), 429
+
 
 # Clientside callback: Enter key in textarea triggers pricing
 app.clientside_callback(
@@ -54,6 +186,77 @@ app.clientside_callback(
     Input("order-text", "value"),
 )
 
+# Clientside callback: Enter key in username input triggers submit
+app.clientside_callback(
+    """
+    function(id) {
+        var input = document.getElementById("username-input");
+        if (input && !input._enterBound) {
+            input.addEventListener("keydown", function(e) {
+                if (e.key === "Enter") {
+                    e.preventDefault();
+                    var btn = document.getElementById("username-submit-btn");
+                    if (btn) btn.click();
+                }
+            });
+            input._enterBound = true;
+        }
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("username-error", "children"),
+    Input("username-input", "value"),
+    prevent_initial_call=True,
+)
+
+# Clientside callback: SocketIO client setup for live blotter sync
+app.clientside_callback(
+    """
+    function(username) {
+        if (!username) return [window.dash_clientside.no_update, window.dash_clientside.no_update];
+
+        try {
+            // Only connect once per session
+            if (!window._sio && typeof io !== 'undefined') {
+                var sio = io();
+                window._sio = sio;
+
+                sio.on('connect', function() {
+                    sio.emit('register', {username: username});
+                });
+
+                sio.on('blotter_changed', function(data) {
+                    // fallback polling will pick up changes
+                });
+
+                sio.on('user_count', function(data) {
+                    var el = document.getElementById("online-count");
+                    if (el) el.textContent = data.count + " online";
+                });
+
+                sio.on('server_full', function(data) {
+                    var modal = document.getElementById("username-modal");
+                    if (modal) modal.style.display = "flex";
+                    var err = document.getElementById("username-error");
+                    if (err) err.textContent = data.message || "Server full.";
+                });
+            } else if (window._sio) {
+                // Re-register if username changed
+                window._sio.emit('register', {username: username});
+            }
+        } catch(e) {
+            console.warn("SocketIO setup failed:", e);
+        }
+
+        return [username, window.dash_clientside.no_update];
+    }
+    """,
+    Output("user-display", "children"),
+    Output("ws-online-count", "data"),
+    Input("current-user", "data"),
+    prevent_initial_call=True,
+)
+
 # Try live Bloomberg first, fall back to mock
 _client = create_client(use_mock=False)
 
@@ -64,28 +267,31 @@ _client = create_client(use_mock=False)
 _HIDDEN = {"display": "none"}
 
 _HEADER_VISIBLE_STYLE = {
-    "backgroundColor": "#1a1a2e",
-    "padding": "12px 20px",
-    "borderRadius": "6px",
-    "marginBottom": "15px",
+    "backgroundColor": COLORS["bg_card"],
+    "padding": "14px 20px",
+    "borderRadius": "10px",
+    "marginBottom": "14px",
+    "border": f"1px solid {COLORS['border_accent']}",
     "display": "block",
 }
 
 _BROKER_VISIBLE_STYLE = {
-    "backgroundColor": "#1a1a2e",
-    "padding": "15px 20px",
-    "borderRadius": "6px",
-    "marginTop": "15px",
+    "backgroundColor": COLORS["bg_card"],
+    "padding": "14px 20px",
+    "borderRadius": "10px",
+    "marginTop": "14px",
+    "border": f"1px solid {COLORS['border']}",
     "display": "flex",
     "gap": "20px",
     "alignItems": "center",
 }
 
 _ORDER_INPUT_VISIBLE_STYLE = {
-    "backgroundColor": "#1a1a2e",
-    "padding": "15px 20px",
-    "borderRadius": "6px",
-    "marginTop": "15px",
+    "backgroundColor": COLORS["bg_card"],
+    "padding": "14px 20px",
+    "borderRadius": "10px",
+    "marginTop": "14px",
+    "border": f"1px solid {COLORS['border']}",
     "display": "block",
 }
 
@@ -225,16 +431,14 @@ def _build_header_and_extras(order, spot, struct_data, multiplier):
     header_items.append(
         html.Span(
             f"{order.underlying} {structure_name}",
-            style={"color": "#00d4ff", "fontWeight": "bold", "fontSize": "17px"},
+            style={"color": COLORS["text_accent"], "fontWeight": "bold", "fontSize": "17px"},
         )
     )
     if order.stock_ref > 0:
         header_items.append(html.Span(f"Tie: ${order.stock_ref:.2f}"))
     header_items.append(html.Span(f"Stock: ${spot:.2f}"))
-    if order.delta > 0:
-        header_items.append(html.Span(f"Delta: +{order.delta:.0f}"))
-    elif order.delta < 0:
-        header_items.append(html.Span(f"Delta: {order.delta:.0f}"))
+    if order.delta != 0:
+        header_items.append(html.Span(f"Delta: {order.delta:+.0f}"))
 
     broker_style = _HIDDEN
     broker_content = []
@@ -251,7 +455,7 @@ def _build_header_and_extras(order, spot, struct_data, multiplier):
             ),
         ]
         edge = order.price - abs(struct_data.structure_mid)
-        edge_color = "#00ff88" if edge > 0 else "#ff4444"
+        edge_color = COLORS["positive"] if edge > 0 else COLORS["negative"]
         broker_content.append(
             html.Span(
                 f"Edge: {edge:+.2f}",
@@ -603,6 +807,7 @@ def clear_all(n_clicks):
     Input("add-order-btn", "n_clicks"),
     State("current-structure", "data"),
     State("order-store", "data"),
+    State("current-user", "data"),
     # Capture pricer state for recall
     State("pricing-display", "data"),
     State("manual-underlying", "value"),
@@ -614,7 +819,7 @@ def clear_all(n_clicks):
     State("manual-quantity", "value"),
     prevent_initial_call=True,
 )
-def add_order(n_clicks, current_data, existing_orders,
+def add_order(n_clicks, current_data, existing_orders, current_user,
               table_data, toolbar_underlying, toolbar_struct, toolbar_ref,
               toolbar_delta, toolbar_broker_px, toolbar_quote_side, toolbar_qty):
     if not current_data:
@@ -629,6 +834,7 @@ def add_order(n_clicks, current_data, existing_orders,
     order_record = {
         "id": str(uuid.uuid4()),
         "added_time": datetime.now().strftime("%H:%M"),
+        "created_by": current_user or "",
         "underlying": current_data["underlying"],
         "structure": f"{current_data['structure_name']} {current_data['structure_detail']}",
         "bid_size": str(current_data["bid_size"]),
@@ -659,16 +865,85 @@ def add_order(n_clicks, current_data, existing_orders,
     orders = existing_orders or []
     orders.append(order_record)
 
-    # Persist to JSON
+    # Persist to SQLite
     store_save_orders(orders)
 
-    # Build display rows (strip underscore fields)
-    blotter_rows = [
-        {k: v for k, v in o.items() if not k.startswith("_")}
-        for o in orders
-    ]
+    # Broadcast to other clients via WebSocket
+    socketio.emit("blotter_changed", {"action": "added"}, to="/")
 
-    return blotter_rows, orders, "", None, None, True
+    return _to_blotter_rows(orders), orders, "", None, None, True
+
+
+# ---------------------------------------------------------------------------
+# Callback: show delete confirmation modal when X column is clicked
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output("delete-confirm-modal", "style"),
+    Output("pending-delete-id", "data"),
+    Output("delete-confirm-detail", "children"),
+    Input("blotter-table", "active_cell"),
+    State("blotter-table", "data"),
+    prevent_initial_call=True,
+)
+def show_delete_modal(active_cell, blotter_data):
+    """Show confirmation modal when user clicks the X column."""
+    if not active_cell or not blotter_data:
+        return no_update, no_update, no_update
+
+    # Only trigger on the delete column
+    if active_cell.get("column_id") != "delete":
+        return {"display": "none"}, None, ""
+
+    row_idx = active_cell["row"]
+    if row_idx >= len(blotter_data):
+        return no_update, no_update, no_update
+
+    row = blotter_data[row_idx]
+    order_id = row.get("id")
+    if not order_id:
+        return no_update, no_update, no_update
+
+    detail = f"{row.get('underlying', '')} {row.get('structure', '')}"
+    return {"display": "block"}, order_id, detail
+
+
+@callback(
+    Output("blotter-table", "data", allow_duplicate=True),
+    Output("order-store", "data", allow_duplicate=True),
+    Output("delete-confirm-modal", "style", allow_duplicate=True),
+    Output("pending-delete-id", "data", allow_duplicate=True),
+    Output("blotter-edit-suppress", "data", allow_duplicate=True),
+    Input("delete-confirm-btn", "n_clicks"),
+    State("pending-delete-id", "data"),
+    State("order-store", "data"),
+    prevent_initial_call=True,
+)
+def confirm_delete_order(n_clicks, pending_id, orders):
+    """Actually delete the order after user confirms."""
+    if not pending_id or not orders:
+        return no_update, no_update, {"display": "none"}, None, no_update
+
+    updated_orders = [o for o in orders if o.get("id") != pending_id]
+
+    # Persist to SQLite
+    store_save_orders(updated_orders)
+
+    # Broadcast to other clients
+    socketio.emit("blotter_changed", {"action": "deleted"}, to="/")
+
+    return _to_blotter_rows(updated_orders), updated_orders, {"display": "none"}, None, True
+
+
+@callback(
+    Output("delete-confirm-modal", "style", allow_duplicate=True),
+    Output("pending-delete-id", "data", allow_duplicate=True),
+    Input("delete-cancel-btn", "n_clicks"),
+    prevent_initial_call=True,
+)
+def cancel_delete_order(n_clicks):
+    """Hide the delete confirmation modal."""
+    return {"display": "none"}, None
 
 
 # ---------------------------------------------------------------------------
@@ -740,16 +1015,13 @@ def sync_blotter_edits(data_ts, blotter_data, orders, suppress):
 
     updated_orders = list(order_map.values())
 
-    # Persist to JSON
+    # Persist to SQLite
     store_save_orders(updated_orders)
 
-    # Build display rows
-    display_rows = [
-        {k: v for k, v in o.items() if not k.startswith("_")}
-        for o in updated_orders
-    ]
+    # Broadcast to other clients via WebSocket
+    socketio.emit("blotter_changed", {"action": "updated"}, to="/")
 
-    return updated_orders, display_rows, True
+    return updated_orders, _to_blotter_rows(updated_orders), True
 
 
 # ---------------------------------------------------------------------------
@@ -779,7 +1051,10 @@ def toggle_column_panel(n_clicks, current_style):
     prevent_initial_call=True,
 )
 def update_visible_columns(selected_columns):
-    visible = [c for c in _BLOTTER_COLUMNS if c["id"] in selected_columns]
+    # Always include the delete column first, then user-selected columns
+    visible = [_BLOTTER_COLUMNS[0]] + [
+        c for c in _BLOTTER_COLUMNS[1:] if c["id"] in selected_columns
+    ]
     return visible, selected_columns
 
 
@@ -813,6 +1088,10 @@ def recall_order(active_cell, blotter_data, orders):
     if not active_cell or not orders or not blotter_data:
         return (no_update,) * 16
 
+    # Ignore clicks on the delete column (handled by show_delete_modal)
+    if active_cell.get("column_id") == "delete":
+        return (no_update,) * 16
+
     row_idx = active_cell["row"]
     if row_idx >= len(blotter_data):
         return (no_update,) * 16
@@ -843,7 +1122,7 @@ def recall_order(active_cell, blotter_data, orders):
         header_items = [
             html.Span(
                 f"{current_data['underlying']} {current_data['structure_name']}",
-                style={"color": "#00d4ff", "fontWeight": "bold", "fontSize": "17px"},
+                style={"color": COLORS["text_accent"], "fontWeight": "bold", "fontSize": "17px"},
             ),
         ]
         header_style = _HEADER_VISIBLE_STYLE
@@ -854,7 +1133,7 @@ def recall_order(active_cell, blotter_data, orders):
             quote_side = (order.get("_quote_side") or "bid").upper()
             mid = current_data["mid"]
             edge = float(broker_px) - mid
-            edge_color = "#00ff88" if edge > 0 else "#ff4444"
+            edge_color = COLORS["positive"] if edge > 0 else COLORS["negative"]
             broker_content = [
                 html.Span(
                     f"Broker: {float(broker_px):.2f} {quote_side}",
@@ -891,9 +1170,117 @@ def recall_order(active_cell, blotter_data, orders):
     )
 
 
+# ---------------------------------------------------------------------------
+# Callback: username modal — submit username, hide modal
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output("username-modal", "style"),
+    Output("current-user", "data"),
+    Output("username-error", "children", allow_duplicate=True),
+    Output("online-count", "children", allow_duplicate=True),
+    Input("username-submit-btn", "n_clicks"),
+    State("username-input", "value"),
+    State("current-user", "data"),
+    prevent_initial_call=True,
+)
+def submit_username(n_clicks, username_input, existing_user):
+    name = (username_input or "").strip()
+    if not name:
+        return no_update, no_update, "Please enter your name.", no_update
+
+    # +1 because this user's WebSocket register hasn't fired yet
+    count = len(_connected_users) + (1 if not existing_user else 0)
+    return {"display": "none"}, name, "", f"{count} online"
+
+
+# ---------------------------------------------------------------------------
+# Callback: restore username modal state on page load
+# (if session already has a username, hide the modal immediately)
+# ---------------------------------------------------------------------------
+
+app.clientside_callback(
+    """
+    function(username) {
+        if (username && username.length > 0) {
+            return {"display": "none"};
+        }
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("username-modal", "style", allow_duplicate=True),
+    Input("current-user", "data"),
+    prevent_initial_call=True,
+)
+
+
+# ---------------------------------------------------------------------------
+# Callback: poll for blotter updates from other users
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output("blotter-table", "data", allow_duplicate=True),
+    Output("order-store", "data", allow_duplicate=True),
+    Output("blotter-edit-suppress", "data", allow_duplicate=True),
+    Input("blotter-poll", "n_intervals"),
+    State("order-store", "data"),
+    prevent_initial_call=True,
+)
+def poll_blotter_updates(n_intervals, current_orders):
+    """Periodically reload orders from SQLite to pick up changes from other users."""
+    fresh_orders = store_load_orders()
+
+    # Quick check: if order count hasn't changed and IDs match, skip update
+    current_ids = {o.get("id") for o in (current_orders or [])}
+    fresh_ids = {o.get("id") for o in fresh_orders}
+    if current_ids == fresh_ids and len(current_orders or []) == len(fresh_orders):
+        # Also check if any data changed (compare serialized form)
+        return no_update, no_update, no_update
+
+    return _to_blotter_rows(fresh_orders), fresh_orders, True
+
+
+# ---------------------------------------------------------------------------
+# Callback: update online count via poll (reliable server-side fallback)
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output("online-count", "children"),
+    Input("blotter-poll", "n_intervals"),
+    State("current-user", "data"),
+    prevent_initial_call=True,
+)
+def update_online_count(n_intervals, current_user):
+    count = len(_connected_users)
+    if current_user:
+        count = max(count, 1)
+    return f"{count} online"
+
+
+# ---------------------------------------------------------------------------
+# Callback: change username — re-show the modal
+# ---------------------------------------------------------------------------
+
+@callback(
+    Output("username-modal", "style", allow_duplicate=True),
+    Output("username-input", "value"),
+    Input("change-user-btn", "n_clicks"),
+    State("current-user", "data"),
+    prevent_initial_call=True,
+)
+def change_username(n_clicks, current_user):
+    return _MODAL_OVERLAY_STYLE, current_user or ""
+
+
 def main():
-    """Run the dashboard."""
-    app.run(host="127.0.0.1", port=8050, debug=True)
+    """Run the dashboard with SocketIO for multi-user support."""
+    socketio.run(
+        app.server,
+        host=DASHBOARD_HOST,
+        port=DASHBOARD_PORT,
+        debug=DASHBOARD_DEBUG,
+        allow_unsafe_werkzeug=True,
+    )
 
 
 if __name__ == "__main__":

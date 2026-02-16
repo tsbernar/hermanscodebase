@@ -10,7 +10,8 @@ The core use case: broker sends an order like `AAPL Jun26 240/220 PS 1X2 vs250 1
 - **Dash (Plotly)** — web dashboard
 - **NumPy / SciPy** — numerical pricing
 - **blpapi 3.25.12** — Bloomberg Terminal API (installed; falls back to mock when Terminal not running)
-- **pytest** — 94 tests, all passing
+- **Flask-SocketIO** — WebSocket server for multi-user live blotter sync
+- **pytest** — 106 tests, all passing
 
 ## Project Structure
 ```
@@ -20,15 +21,17 @@ src/options_pricer/
 ├── pricer.py            # Black-Scholes pricing engine + Greeks (delta, gamma, theta, vega, rho)
 ├── structure_pricer.py  # Calculates structure bid/offer/mid from individual leg screen prices
 ├── bloomberg.py         # BloombergClient (live) + MockBloombergClient (BS-based realistic quotes)
-├── order_store.py       # JSON persistence for orders (~/.options_pricer/orders.json)
+├── order_store.py       # SQLite persistence for orders (~/.options_pricer/orders.db)
+├── settings.py          # Canonical config (Bloomberg, dashboard, multi-user settings)
 └── dashboard/
-    ├── app.py           # Dash web app entry point + callbacks (pricer, order blotter, column toggle)
-    └── layouts.py       # UI layout: order input, pricer toolbar+table, order blotter, column toggle
+    ├── app.py           # Dash web app + Flask-SocketIO (pricer, blotter, multi-user callbacks)
+    └── layouts.py       # UI layout: username modal, pricer toolbar+table, order blotter
 tests/
 ├── test_models.py       # 17 tests — payoffs, structures
 ├── test_parser.py       # 43 tests — extraction helpers + full order parsing for all IDB formats
-├── test_order_store.py  # 11 tests — JSON persistence (load, save, add, update)
-└── test_pricer.py       # 23 tests — BS pricing, put-call parity, Greeks, structure pricing
+├── test_order_store.py  # 12 tests — SQLite persistence (load, save, add, update, created_by)
+├── test_pricer.py       # 23 tests — BS pricing, put-call parity, Greeks, structure pricing
+└── test_structure_pricer.py # 11 tests — structure bid/offer/mid, sizes, ratio spreads
 ```
 
 ## Broker Shorthand Format
@@ -55,13 +58,15 @@ AAPL Jun26 240/220 PS 1X2 vs250 15d 500x @ 3.50 1X over
 ```
 
 ## Dashboard Display
+- **Username Modal:** Blocking overlay prompts for username on first load. Name stored in session-scoped `dcc.Store`. Displayed in header alongside connected user count.
 - **Paste Order:** `dcc.Textarea` for broker shorthand input. Enter key triggers parse & price via clientside callback.
 - **Pricer Toolbar:** Underlying | Structure | Tie | Delta | Order Price | Side | Qty | [Add Order] — dual-purpose: configures pricing AND submits to order blotter. Side/Qty/Price are all optional.
-- **Header bar:** Ticker, structure type, tie price, current stock price, delta (+/-)
+- **Header bar:** Title (left) + username + "(N online)" count (right). Plus: Ticker, structure type, tie price, current stock price, delta (+/-)
 - **Pricing table:** Editable DataTable — Leg | Expiry | Strike | Type | Side | Qty | Bid Size | Bid | Mid | Offer | Offer Size. Editing triggers auto-reprice.
   - Structure row at bottom with implied bid/offer/mid and sizes
 - **Broker quote section:** Shows broker price vs screen mid and edge
-- **Order Blotter:** Persistent library of all priced structures. 15 columns (6 editable: side, size, traded, bought/sold, traded price, initiator). Column toggle via "Columns" button. Native sort (default: time desc). Click row to recall into pricer. PnL auto-calcs for traded orders. Data persists to `~/.options_pricer/orders.json`.
+- **Order Blotter:** Shared across all users. 16 columns including "User" (created_by). 6 editable: side, size, traded, bought/sold, traded price, initiator. Column toggle via "Columns" button. Native sort (default: time desc). Click row to recall into pricer. PnL auto-calcs for traded orders. Data persists to `~/.options_pricer/orders.db` (SQLite).
+- **Multi-user sync:** Flask-SocketIO broadcasts `blotter_changed` events when any user adds or edits an order. All clients receive updates via WebSocket. A 5-second `dcc.Interval` provides fallback polling if WebSocket disconnects.
 - **Architecture:** Toolbar is always visible; "Add Order" validates a structure is priced. Hidden ID stubs (`order-input-section`, `order-side`, `order-size`) exist for Dash callback compatibility after the standalone order input section was removed.
 
 ## Key Concepts
@@ -81,7 +86,7 @@ python -m options_pricer.dashboard.app # Launch dashboard at http://127.0.0.1:80
 ## UI Rules (MUST follow when editing layouts.py or any dashboard styling)
 - **No content cutoff:** Never use `overflow: hidden` on containers that hold interactive content (toolbars, tables, inputs, dropdowns). Use `overflow: visible` or `overflow: auto` instead.
 - **Box sizing:** All elements with `width: 100%` must also set `boxSizing: border-box` so padding/border don't cause overflow.
-- **Max width:** The main layout container uses `maxWidth: 1400px`. Do not shrink this without good reason.
+- **Full width:** The main layout is fluid (`width: 100%`) — it fills the viewport. The body background is set via `app.index_string` to match `bg_page` so no white bars appear at any viewport size.
 - **Text inputs that may contain long strings:** Use `dcc.Textarea` (not `dcc.Input`) so text wraps visibly. Set `minHeight: 80px`, `resize: vertical`, `lineHeight: 1.5`, and `boxSizing: border-box`. `dcc.Input` is single-line and clips long text — never use it for order/paste fields.
 - **Enter key on Textarea:** `dcc.Textarea` does not support `n_submit`. Use a clientside callback that binds a `keydown` listener and calls `btn.click()` on Enter (see `app.py` for the pattern). Shift+Enter should still allow newlines.
 - **Dropdowns in tables:** Dash DataTable dropdown columns can clip inside tight containers — ensure parent has `overflow: visible`.
@@ -91,11 +96,13 @@ python -m options_pricer.dashboard.app # Launch dashboard at http://127.0.0.1:80
 ## Current Status & Next Steps
 - Parser handles all example formats provided so far (including `Nk` quantity format) — feed more real orders to refine
 - Bloomberg API integrated but needs Terminal running for live data; mock works for dev
-- Order Blotter with JSON persistence, editable cells, column toggle, PnL auto-calc, and recall working
+- Order Blotter with SQLite persistence, editable cells, column toggle, PnL auto-calc, and recall working
+- Multi-user support: username prompt, shared blotter with "User" column, WebSocket live sync (up to 15 users)
+- Settings module (`src/options_pricer/settings.py`) centralizes all config constants
 - Next: delta adjustment for stock tie vs current price in structure pricing
 - Next: more structure types as needed (iron condors, diagonals, etc.)
 - Next: SPX/index options with combo pricing
-- Next: cross-dashboard sharing (order_store.py infrastructure is ready)
+- Note: structure_pricer.py bid/offer sign convention may need review (mid is correct, bid/offer labels may be swapped)
 
 ## GitHub
 - Repo: https://github.com/hermanrockefeller-glitch/mycodebase.git

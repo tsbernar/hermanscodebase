@@ -166,7 +166,15 @@ def price_structure(
     total_rho = 0.0
 
     for leg in structure.legs:
-        vol = sigma[leg.strike] if isinstance(sigma, dict) else sigma
+        if isinstance(sigma, dict):
+            vol = sigma.get(leg.strike)
+            if vol is None:
+                raise ValueError(
+                    f"No vol provided for strike {leg.strike}. "
+                    f"Available strikes: {sorted(sigma.keys())}"
+                )
+        else:
+            vol = sigma
         result = greeks(spot, leg.strike, T, r, vol, leg.option_type, q)
 
         direction = leg.direction

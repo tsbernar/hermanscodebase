@@ -1,15 +1,3 @@
-"""Configuration settings for the options pricer."""
+"""Legacy config location — canonical settings are in src/options_pricer/settings.py."""
 
-BLOOMBERG_HOST = "localhost"
-BLOOMBERG_PORT = 8194
-
-# Risk-free rate default (annualized)
-DEFAULT_RISK_FREE_RATE = 0.05
-
-# Default dividend yield
-DEFAULT_DIVIDEND_YIELD = 0.0
-
-# Dashboard settings
-DASHBOARD_HOST = "127.0.0.1"
-DASHBOARD_PORT = 8050
-DASHBOARD_DEBUG = True
+from options_pricer.settings import *  # noqa: F401,F403
