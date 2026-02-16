@@ -893,7 +893,8 @@ def recall_order(active_cell, blotter_data, orders):
 
 def main():
     """Run the dashboard."""
-    app.run(host="127.0.0.1", port=8050, debug=True)
+    from ..settings import DASHBOARD_DEBUG, DASHBOARD_HOST, DASHBOARD_PORT
+    app.run(host=DASHBOARD_HOST, port=DASHBOARD_PORT, debug=DASHBOARD_DEBUG)
 
 
 if __name__ == "__main__":

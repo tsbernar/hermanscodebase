@@ -593,10 +593,10 @@ def create_order_blotter(initial_data=None):
                         "color": "#ff4444",
                         "fontWeight": "bold",
                     },
-                    # PnL coloring
+                    # PnL coloring — PnL values are formatted as "+1,500" / "-2,300"
                     {
                         "if": {
-                            "filter_query": "{pnl} contains '-'",
+                            "filter_query": '{pnl} contains "-"',
                             "column_id": "pnl",
                         },
                         "color": "#ff4444",
@@ -604,7 +604,7 @@ def create_order_blotter(initial_data=None):
                     },
                     {
                         "if": {
-                            "filter_query": "{pnl} contains '+'",
+                            "filter_query": '{pnl} contains "+"',
                             "column_id": "pnl",
                         },
                         "color": "#00ff88",
