@@ -1,4 +1,4 @@
-"""Data models for option legs and structures."""
+"""Data models for IDB option orders and structures."""
 
 from dataclasses import dataclass, field
 from datetime import date
@@ -15,6 +15,11 @@ class Side(Enum):
     SELL = "sell"
 
 
+class QuoteSide(Enum):
+    BID = "bid"
+    OFFER = "offer"
+
+
 @dataclass
 class OptionLeg:
     """A single option leg within a structure."""
@@ -25,6 +30,7 @@ class OptionLeg:
     option_type: OptionType
     side: Side
     quantity: int = 1
+    ratio: int = 1
 
     @property
     def direction(self) -> int:
@@ -69,3 +75,51 @@ class OptionStructure:
     @property
     def underlyings(self) -> set[str]:
         return {leg.underlying for leg in self.legs}
+
+
+@dataclass
+class ParsedOrder:
+    """A fully parsed IDB broker order with all metadata."""
+
+    underlying: str
+    structure: OptionStructure
+    stock_ref: float
+    delta: float
+    price: float
+    quote_side: QuoteSide
+    quantity: int
+    raw_text: str = ""
+
+
+@dataclass
+class LegMarketData:
+    """Market data for a single option leg from screen."""
+
+    bid: float = 0.0
+    bid_size: int = 0
+    offer: float = 0.0
+    offer_size: int = 0
+
+    @property
+    def mid(self) -> float:
+        if self.bid > 0 and self.offer > 0:
+            return (self.bid + self.offer) / 2.0
+        return self.bid or self.offer
+
+
+@dataclass
+class StructureMarketData:
+    """Full market pricing for a structure."""
+
+    leg_data: list[tuple[OptionLeg, LegMarketData]] = field(default_factory=list)
+    stock_price: float = 0.0
+    stock_ref: float = 0.0
+    delta: float = 0.0
+    structure_bid: float = 0.0
+    structure_offer: float = 0.0
+    structure_bid_size: int = 0
+    structure_offer_size: int = 0
+
+    @property
+    def structure_mid(self) -> float:
+        return (self.structure_bid + self.structure_offer) / 2.0

@@ -4,8 +4,11 @@ Provides a mock-friendly interface so the dashboard and tests can run
 without a Bloomberg Terminal connection.
 """
 
+import math
 from dataclasses import dataclass, field
 from datetime import date
+
+from scipy.stats import norm
 
 
 @dataclass
@@ -19,11 +22,18 @@ class MarketData:
     dividend_yield: float = 0.0
 
 
-class BloombergClient:
-    """Wrapper around blpapi for fetching live market data.
+@dataclass
+class OptionQuote:
+    """Bid/offer quote for a single option from screen."""
 
-    When Bloomberg is unavailable, falls back to MockBloombergClient.
-    """
+    bid: float = 0.0
+    bid_size: int = 0
+    offer: float = 0.0
+    offer_size: int = 0
+
+
+class BloombergClient:
+    """Wrapper around blpapi for fetching live market data."""
 
     def __init__(self, host: str = "localhost", port: int = 8194):
         self._host = host
@@ -31,7 +41,6 @@ class BloombergClient:
         self._session = None
 
     def connect(self) -> bool:
-        """Attempt to connect to the Bloomberg session."""
         try:
             import blpapi
 
@@ -44,13 +53,11 @@ class BloombergClient:
             return False
 
     def disconnect(self):
-        """Disconnect from Bloomberg."""
         if self._session:
             self._session.stop()
             self._session = None
 
     def get_spot(self, underlying: str) -> float | None:
-        """Fetch the current spot price for an underlying."""
         if not self._session:
             return None
         try:
@@ -74,25 +81,72 @@ class BloombergClient:
         except Exception:
             return None
 
+    def get_option_quote(
+        self, underlying: str, expiry: date, strike: float, option_type: str,
+    ) -> OptionQuote:
+        """Fetch live bid/offer/size for a specific option from Bloomberg."""
+        if not self._session:
+            return OptionQuote()
+        try:
+            import blpapi
+
+            # Build Bloomberg option ticker
+            # Format: "AAPL 06/16/26 C300 Equity" for AAPL Jun26 300 Call
+            exp_str = expiry.strftime("%m/%d/%y")
+            type_char = "C" if option_type == "call" else "P"
+            ticker = f"{underlying} {exp_str} {type_char}{strike:.0f} Equity"
+
+            refdata = self._session.getService("//blp/refdata")
+            request = refdata.createRequest("ReferenceDataRequest")
+            request.append("securities", ticker)
+            request.append("fields", "BID")
+            request.append("fields", "ASK")
+            request.append("fields", "BID_SIZE")
+            request.append("fields", "ASK_SIZE")
+            self._session.sendRequest(request)
+
+            quote = OptionQuote()
+            while True:
+                event = self._session.nextEvent(500)
+                for msg in event:
+                    if msg.hasElement("securityData"):
+                        sec_data = msg.getElement("securityData").getValueAsElement(0)
+                        fd = sec_data.getElement("fieldData")
+                        try:
+                            quote.bid = fd.getElementAsFloat("BID")
+                        except Exception:
+                            pass
+                        try:
+                            quote.offer = fd.getElementAsFloat("ASK")
+                        except Exception:
+                            pass
+                        try:
+                            quote.bid_size = int(fd.getElementAsFloat("BID_SIZE"))
+                        except Exception:
+                            pass
+                        try:
+                            quote.offer_size = int(fd.getElementAsFloat("ASK_SIZE"))
+                        except Exception:
+                            pass
+                if event.eventType() == blpapi.Event.RESPONSE:
+                    break
+            return quote
+        except Exception:
+            return OptionQuote()
+
     def get_implied_vol(
-        self, underlying: str, expiry: date, strike: float
+        self, underlying: str, expiry: date, strike: float,
     ) -> float | None:
-        """Fetch implied volatility for a specific option."""
         if not self._session:
             return None
-        # In production, this would construct the option ticker and query Bloomberg
-        # e.g., "AAPL 01/16/25 C150 Equity" for AAPL Jan25 150 Call
         return None
 
     def get_risk_free_rate(self) -> float:
-        """Fetch current risk-free rate (US Treasury yield)."""
         if not self._session:
             return 0.05
-        # Would query "USGG3M Index" or similar
         return 0.05
 
     def get_market_data(self, underlying: str) -> MarketData:
-        """Fetch a full market data snapshot for an underlying."""
         spot = self.get_spot(underlying)
         rate = self.get_risk_free_rate()
         return MarketData(
@@ -103,10 +157,10 @@ class BloombergClient:
 
 
 class MockBloombergClient:
-    """Mock Bloomberg client with sample data for testing and demo purposes."""
+    """Mock Bloomberg client with realistic option pricing for development."""
 
     _MOCK_SPOTS: dict[str, float] = {
-        "AAPL": 185.50,
+        "AAPL": 250.30,
         "MSFT": 415.20,
         "GOOGL": 175.80,
         "AMZN": 195.60,
@@ -115,7 +169,12 @@ class MockBloombergClient:
         "QQQ": 445.10,
         "META": 560.75,
         "NVDA": 880.50,
-        "IWM": 205.60,
+        "IWM": 262.60,
+        "UBER": 69.90,
+        "QCOM": 141.20,
+        "VST": 171.10,
+        "SPX": 5204.00,
+        "NFLX": 950.00,
     }
 
     _MOCK_VOLS: dict[str, float] = {
@@ -129,6 +188,11 @@ class MockBloombergClient:
         "META": 0.32,
         "NVDA": 0.42,
         "IWM": 0.18,
+        "UBER": 0.35,
+        "QCOM": 0.30,
+        "VST": 0.38,
+        "SPX": 0.14,
+        "NFLX": 0.34,
     }
 
     def connect(self) -> bool:
@@ -140,15 +204,46 @@ class MockBloombergClient:
     def get_spot(self, underlying: str) -> float:
         return self._MOCK_SPOTS.get(underlying.upper(), 100.0)
 
-    def get_implied_vol(
-        self, underlying: str, expiry: date, strike: float
-    ) -> float:
-        base_vol = self._MOCK_VOLS.get(underlying.upper(), 0.25)
-        # Simple vol skew: OTM puts have higher vol
+    def get_option_quote(
+        self, underlying: str, expiry: date, strike: float, option_type: str,
+    ) -> OptionQuote:
+        """Generate realistic option quotes using Black-Scholes with a spread."""
         spot = self.get_spot(underlying)
-        moneyness = strike / spot
-        skew = 0.05 * (1.0 - moneyness) if moneyness < 1.0 else 0.0
-        return base_vol + skew
+        vol = self._get_vol(underlying, strike, spot)
+        rate = 0.05
+
+        today = date.today()
+        T = max((expiry - today).days / 365.0, 0.001)
+
+        # Calculate theoretical price via Black-Scholes
+        theo = self._bs_price(spot, strike, T, rate, vol, option_type)
+
+        # Add realistic bid-ask spread (wider for further OTM)
+        moneyness = abs(spot - strike) / spot
+        spread_pct = 0.02 + 0.03 * moneyness  # 2-5% spread
+        half_spread = max(theo * spread_pct, 0.05)
+
+        bid = max(theo - half_spread, 0.01)
+        offer = theo + half_spread
+
+        # Generate realistic sizes
+        import random
+        random.seed(int(strike * 100 + spot * 10))
+        bid_size = random.randint(100, 1000)
+        offer_size = random.randint(100, 800)
+
+        return OptionQuote(
+            bid=round(bid, 2),
+            bid_size=bid_size,
+            offer=round(offer, 2),
+            offer_size=offer_size,
+        )
+
+    def get_implied_vol(
+        self, underlying: str, expiry: date, strike: float,
+    ) -> float:
+        spot = self.get_spot(underlying)
+        return self._get_vol(underlying, strike, spot)
 
     def get_risk_free_rate(self) -> float:
         return 0.05
@@ -160,6 +255,24 @@ class MockBloombergClient:
             risk_free_rate=self.get_risk_free_rate(),
         )
 
+    def _get_vol(self, underlying: str, strike: float, spot: float) -> float:
+        base_vol = self._MOCK_VOLS.get(underlying.upper(), 0.25)
+        moneyness = strike / spot
+        # Vol skew: OTM puts have higher vol
+        skew = 0.05 * (1.0 - moneyness) if moneyness < 1.0 else 0.0
+        return base_vol + skew
+
+    @staticmethod
+    def _bs_price(
+        S: float, K: float, T: float, r: float, sigma: float, option_type: str,
+    ) -> float:
+        d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
+        d2 = d1 - sigma * math.sqrt(T)
+        if option_type == "call":
+            return S * norm.cdf(d1) - K * math.exp(-r * T) * norm.cdf(d2)
+        else:
+            return K * math.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+
 
 def create_client(use_mock: bool = False, **kwargs) -> BloombergClient | MockBloombergClient:
     """Factory to create a Bloomberg client, falling back to mock if needed."""
@@ -168,5 +281,4 @@ def create_client(use_mock: bool = False, **kwargs) -> BloombergClient | MockBlo
     client = BloombergClient(**kwargs)
     if client.connect():
         return client
-    # Fall back to mock if Bloomberg is unavailable
     return MockBloombergClient()

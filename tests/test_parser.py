@@ -1,132 +1,232 @@
-"""Tests for the order parser."""
+"""Tests for the IDB broker shorthand parser."""
 
 from datetime import date
 
 import pytest
 
-from options_pricer.models import OptionType, Side
-from options_pricer.parser import parse_order
+from options_pricer.models import OptionType, Side, QuoteSide
+from options_pricer.parser import (
+    parse_order,
+    _extract_stock_ref,
+    _extract_delta,
+    _extract_quantity,
+    _extract_price_and_side,
+    _extract_ratio,
+    _extract_modifier,
+    _extract_structure_type,
+)
+
+
+class TestExtractStockRef:
+    def test_vs_no_space(self):
+        assert _extract_stock_ref("AAPL Jun26 300 calls vs250.32") == 250.32
+
+    def test_vs_space(self):
+        assert _extract_stock_ref("vs 262.54") == 262.54
+
+    def test_vs_dot(self):
+        assert _extract_stock_ref("vs. 250") == 250.0
+
+    def test_tt_no_space(self):
+        assert _extract_stock_ref("tt69.86") == 69.86
+
+    def test_tt_space(self):
+        assert _extract_stock_ref("tt 171.10") == 171.10
+
+    def test_t_space(self):
+        assert _extract_stock_ref("AAPL t 250.00") == 250.00
+
+    def test_none(self):
+        assert _extract_stock_ref("AAPL Jun26 300 calls") is None
+
+
+class TestExtractDelta:
+    def test_simple(self):
+        assert _extract_delta("30d") == 30.0
+
+    def test_single_digit(self):
+        assert _extract_delta("3d") == 3.0
+
+    def test_on_a(self):
+        assert _extract_delta("on a 11d") == 11.0
+
+    def test_in_context(self):
+        assert _extract_delta("UBER Jun26 45P tt69.86 3d 0.41 bid") == 3.0
+
+
+class TestExtractQuantity:
+    def test_simple(self):
+        assert _extract_quantity("1058x") == 1058
+
+    def test_in_context(self):
+        assert _extract_quantity("AAPL Jun26 300 calls 500x") == 500
+
+    def test_with_ratio(self):
+        # Should not match the "1" in "1X2", should match "500x"
+        assert _extract_quantity("PS 1X2 500x") == 500
+
+
+class TestExtractPriceAndSide:
+    def test_bid_word(self):
+        price, side = _extract_price_and_side("20.50 bid")
+        assert price == 20.50
+        assert side == QuoteSide.BID
+
+    def test_bid_suffix(self):
+        price, side = _extract_price_and_side("2.4b")
+        assert price == 2.4
+        assert side == QuoteSide.BID
+
+    def test_at_symbol(self):
+        price, side = _extract_price_and_side("@ 1.60")
+        assert price == 1.60
+        assert side == QuoteSide.OFFER
+
+    def test_at_with_qty(self):
+        price, side = _extract_price_and_side("500 @ 2.55")
+        assert price == 2.55
+        assert side == QuoteSide.OFFER
+
+    def test_offer_word(self):
+        price, side = _extract_price_and_side("5.00 offer")
+        assert price == 5.00
+        assert side == QuoteSide.OFFER
+
+
+class TestExtractRatio:
+    def test_1x2(self):
+        assert _extract_ratio("PS 1X2 500x") == (1, 2)
+
+    def test_1x3(self):
+        assert _extract_ratio("1x3") == (1, 3)
+
+    def test_no_ratio(self):
+        assert _extract_ratio("500x @ 3.50") is None
+
+
+class TestExtractModifier:
+    def test_putover(self):
+        assert _extract_modifier("putover") == "putover"
+
+    def test_put_over(self):
+        assert _extract_modifier("put over") == "putover"
+
+    def test_callover(self):
+        assert _extract_modifier("callover") == "callover"
+
+    def test_nx_over(self):
+        assert _extract_modifier("1X over") == "1x_over"
+
+
+class TestExtractStructureType:
+    def test_ps(self):
+        assert _extract_structure_type("AAPL Jun26 240/220 PS") == "put_spread"
+
+    def test_cs(self):
+        assert _extract_structure_type("AAPL Jun26 240/280 CS") == "call_spread"
+
+    def test_risky(self):
+        assert _extract_structure_type("IWM feb 257 apr 280 Risky") == "risk_reversal"
+
+    def test_straddle(self):
+        assert _extract_structure_type("AAPL Jun26 250 straddle") == "straddle"
+
+    def test_fly(self):
+        assert _extract_structure_type("AAPL fly 240/250/260") == "butterfly"
 
 
 class TestParseOrder:
     def test_single_call(self):
-        s = parse_order("BUY 100 AAPL Jan25 150 call")
-        assert s.name == "single"
-        assert len(s.legs) == 1
-        leg = s.legs[0]
-        assert leg.underlying == "AAPL"
-        assert leg.expiry == date(2025, 1, 16)
-        assert leg.strike == 150.0
+        order = parse_order("AAPL jun26 300 calls vs250.32 30d 20.50 bid 1058x")
+        assert order.underlying == "AAPL"
+        assert order.stock_ref == 250.32
+        assert order.delta == 30.0
+        assert order.price == 20.50
+        assert order.quote_side == QuoteSide.BID
+        assert order.quantity == 1058
+        assert len(order.structure.legs) == 1
+        leg = order.structure.legs[0]
+        assert leg.strike == 300.0
         assert leg.option_type == OptionType.CALL
-        assert leg.side == Side.BUY
-        assert leg.quantity == 100
+        assert leg.expiry == date(2026, 6, 16)
 
-    def test_single_put(self):
-        s = parse_order("SELL 50 SPY Mar25 450 put")
-        assert s.name == "single"
-        assert len(s.legs) == 1
-        assert s.legs[0].option_type == OptionType.PUT
-        assert s.legs[0].side == Side.SELL
+    def test_single_put_with_tt(self):
+        order = parse_order("UBER Jun26 45P tt69.86 3d 0.41 bid 1058x")
+        assert order.underlying == "UBER"
+        assert order.stock_ref == 69.86
+        assert order.delta == 3.0
+        assert order.price == 0.41
+        assert order.quote_side == QuoteSide.BID
+        assert len(order.structure.legs) == 1
+        leg = order.structure.legs[0]
+        assert leg.strike == 45.0
+        assert leg.option_type == OptionType.PUT
 
-    def test_call_spread(self):
-        s = parse_order("BUY 100 AAPL Jan25 150/160 call spread")
-        assert s.name == "spread"
-        assert len(s.legs) == 2
-        assert s.legs[0].strike == 150.0
-        assert s.legs[0].side == Side.BUY
-        assert s.legs[0].option_type == OptionType.CALL
-        assert s.legs[1].strike == 160.0
-        assert s.legs[1].side == Side.SELL
-        assert s.legs[1].option_type == OptionType.CALL
+    def test_put_strike_before_expiry(self):
+        order = parse_order("QCOM 85P Jan27 tt141.17 7d 2.4b 600x")
+        assert order.underlying == "QCOM"
+        assert order.stock_ref == 141.17
+        assert order.delta == 7.0
+        assert order.price == 2.4
+        assert order.quote_side == QuoteSide.BID
+        assert order.quantity == 600
+        leg = order.structure.legs[0]
+        assert leg.strike == 85.0
+        assert leg.option_type == OptionType.PUT
+        assert leg.expiry == date(2027, 1, 16)
 
-    def test_put_spread(self):
-        s = parse_order("BUY 20 MSFT Apr25 300/320 put spread")
-        assert s.name == "spread"
-        assert s.legs[0].option_type == OptionType.PUT
-        assert s.legs[1].option_type == OptionType.PUT
+    def test_at_price_convention(self):
+        order = parse_order("VST Apr 130p 500 @ 2.55 tt 171.10 on a 11d")
+        assert order.underlying == "VST"
+        assert order.stock_ref == 171.10
+        assert order.delta == 11.0
+        assert order.price == 2.55
+        assert order.quote_side == QuoteSide.OFFER
+        leg = order.structure.legs[0]
+        assert leg.strike == 130.0
+        assert leg.option_type == OptionType.PUT
 
-    def test_straddle(self):
-        s = parse_order("BUY 10 TSLA Feb25 200 straddle")
-        assert s.name == "straddle"
-        assert len(s.legs) == 2
-        assert s.legs[0].option_type == OptionType.CALL
-        assert s.legs[1].option_type == OptionType.PUT
-        assert s.legs[0].strike == s.legs[1].strike == 200.0
-        assert s.legs[0].side == s.legs[1].side == Side.BUY
+    def test_calendar_risk_reversal(self):
+        order = parse_order(
+            "IWM feb 257 apr 280 Risky vs 262.54 52d 2500x @ 1.60"
+        )
+        assert order.underlying == "IWM"
+        assert order.stock_ref == 262.54
+        assert order.delta == 52.0
+        assert order.price == 1.60
+        assert order.quantity == 2500
+        assert len(order.structure.legs) == 2
+        # Lower strike should be the put, higher the call
+        put_leg = [l for l in order.structure.legs
+                   if l.option_type == OptionType.PUT][0]
+        call_leg = [l for l in order.structure.legs
+                    if l.option_type == OptionType.CALL][0]
+        assert put_leg.strike == 257.0
+        assert call_leg.strike == 280.0
 
-    def test_strangle(self):
-        s = parse_order("BUY 10 AAPL Jun25 150/160 strangle")
-        assert s.name == "strangle"
-        assert len(s.legs) == 2
-        # Lower strike is put, higher is call
-        assert s.legs[0].option_type == OptionType.PUT
-        assert s.legs[0].strike == 150.0
-        assert s.legs[1].option_type == OptionType.CALL
-        assert s.legs[1].strike == 160.0
+    def test_put_spread_ratio(self):
+        order = parse_order(
+            "AAPL Jun26 240/220 PS 1X2 vs250 15d 500x @ 3.50 1X over"
+        )
+        assert order.underlying == "AAPL"
+        assert order.stock_ref == 250.0
+        assert order.delta == 15.0
+        assert order.price == 3.50
+        assert len(order.structure.legs) == 2
+        # Sell higher strike (240P), buy lower strike (220P) at 2x
+        sell_leg = [l for l in order.structure.legs if l.side == Side.SELL][0]
+        buy_leg = [l for l in order.structure.legs if l.side == Side.BUY][0]
+        assert sell_leg.strike == 240.0
+        assert sell_leg.option_type == OptionType.PUT
+        assert sell_leg.quantity == 500  # 500 * r1(1)
+        assert buy_leg.strike == 220.0
+        assert buy_leg.option_type == OptionType.PUT
+        assert buy_leg.quantity == 1000  # 500 * r2(2)
 
-    def test_butterfly(self):
-        s = parse_order("BUY 5 AMZN Jul25 180/190/200 call butterfly")
-        assert s.name == "butterfly"
-        assert len(s.legs) == 3
-        assert s.legs[0].strike == 180.0
-        assert s.legs[0].side == Side.BUY
-        assert s.legs[0].quantity == 5
-        assert s.legs[1].strike == 190.0
-        assert s.legs[1].side == Side.SELL
-        assert s.legs[1].quantity == 10  # 2x middle
-        assert s.legs[2].strike == 200.0
-        assert s.legs[2].side == Side.BUY
-        assert s.legs[2].quantity == 5
+    def test_empty_raises(self):
+        with pytest.raises(ValueError):
+            parse_order("")
 
-    def test_risk_reversal(self):
-        s = parse_order("BUY 10 GOOGL Sep25 150P/160C risk reversal")
-        assert s.name == "risk reversal"
-        assert len(s.legs) == 2
-        # Sell the put, buy the call
-        assert s.legs[0].strike == 150.0
-        assert s.legs[0].option_type == OptionType.PUT
-        assert s.legs[0].side == Side.SELL
-        assert s.legs[1].strike == 160.0
-        assert s.legs[1].option_type == OptionType.CALL
-        assert s.legs[1].side == Side.BUY
-
-    def test_collar(self):
-        s = parse_order("BUY 10 META Dec25 400P/450C collar")
-        assert s.name == "collar"
-        assert len(s.legs) == 2
-        # Buy the put, sell the call
-        assert s.legs[0].strike == 400.0
-        assert s.legs[0].option_type == OptionType.PUT
-        assert s.legs[0].side == Side.BUY
-        assert s.legs[1].strike == 450.0
-        assert s.legs[1].option_type == OptionType.CALL
-        assert s.legs[1].side == Side.SELL
-
-    def test_underlying_is_uppercased(self):
-        s = parse_order("BUY 1 aapl Jan25 150 call")
-        assert s.legs[0].underlying == "AAPL"
-
-    def test_expiry_parsing(self):
-        s = parse_order("BUY 1 SPY Dec25 500 call")
-        assert s.legs[0].expiry == date(2025, 12, 16)
-
-    def test_invalid_too_short(self):
-        with pytest.raises(ValueError, match="too short"):
-            parse_order("BUY AAPL")
-
-    def test_invalid_side(self):
-        with pytest.raises(ValueError, match="BUY or SELL"):
-            parse_order("HOLD 100 AAPL Jan25 150 call")
-
-    def test_invalid_quantity(self):
-        with pytest.raises(ValueError, match="quantity"):
-            parse_order("BUY abc AAPL Jan25 150 call")
-
-    def test_invalid_expiry(self):
-        with pytest.raises(ValueError, match="expiry"):
-            parse_order("BUY 100 AAPL 2025-01 150 call")
-
-    def test_sell_spread(self):
-        s = parse_order("SELL 50 AAPL Jan25 150/160 call spread")
-        assert s.legs[0].side == Side.SELL
-        assert s.legs[1].side == Side.BUY
+    def test_ticker_uppercased(self):
+        order = parse_order("aapl Jun26 300 calls vs250 30d 5.00 bid 100x")
+        assert order.underlying == "AAPL"
