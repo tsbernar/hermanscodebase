@@ -16,3 +16,6 @@ DASHBOARD_DEBUG = True
 
 # Multi-user settings
 MAX_USERS = 15
+
+# Bloomberg Bridge settings
+BRIDGE_DEFAULT_PORT = 8195

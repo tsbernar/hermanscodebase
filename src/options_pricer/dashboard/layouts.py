@@ -3,6 +3,7 @@
 from dash import dcc, html, dash_table
 
 from ..order_store import load_orders
+from ..settings import BRIDGE_DEFAULT_PORT
 
 # ---------------------------------------------------------------------------
 # Theme palette — refined dark trading terminal
@@ -412,6 +413,36 @@ def create_header():
                     "fontSize": "13px",
                 },
                 children=[
+                    # Bloomberg status indicator (clickable to toggle settings)
+                    html.Div(
+                        id="bbg-status-indicator",
+                        title="Bloomberg Bridge — click to configure",
+                        style={
+                            "display": "flex",
+                            "alignItems": "center",
+                            "gap": "5px",
+                            "cursor": "pointer",
+                            "backgroundColor": COLORS["bg_card"],
+                            "border": f"1px solid {COLORS['border_light']}",
+                            "borderRadius": "12px",
+                            "padding": "3px 10px",
+                            "fontSize": "12px",
+                            "fontFamily": _FONT_MONO,
+                        },
+                        children=[
+                            html.Span(
+                                id="bbg-status-dot",
+                                style={
+                                    "width": "8px",
+                                    "height": "8px",
+                                    "borderRadius": "50%",
+                                    "backgroundColor": COLORS["negative"],
+                                    "display": "inline-block",
+                                },
+                            ),
+                            html.Span("BBG", style={"color": COLORS["text_muted"]}),
+                        ],
+                    ),
                     # Online count pill
                     html.Span(
                         id="online-count",
@@ -448,6 +479,172 @@ def create_header():
                             "border": "none",
                             "lineHeight": "1",
                         },
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+def create_bbg_settings_panel():
+    """Collapsible Bloomberg Bridge settings panel below header."""
+    _cmd_style = {
+        "display": "inline-block",
+        "backgroundColor": COLORS["bg_input"],
+        "color": COLORS["text_accent"],
+        "fontFamily": _FONT_MONO,
+        "fontSize": "12px",
+        "padding": "6px 12px",
+        "borderRadius": "6px",
+        "border": f"1px solid {COLORS['border_light']}",
+        "userSelect": "all",
+        "cursor": "text",
+    }
+    return html.Div(
+        id="bbg-settings-panel",
+        style={"display": "none"},
+        children=[
+            html.Div(
+                style={
+                    "backgroundColor": COLORS["bg_card"],
+                    "padding": "16px 20px",
+                    "borderRadius": "10px",
+                    "border": f"1px solid {COLORS['border_light']}",
+                    "marginBottom": "14px",
+                },
+                children=[
+                    # Top row: port + test + download
+                    html.Div(
+                        style={
+                            "display": "flex",
+                            "gap": "16px",
+                            "alignItems": "flex-end",
+                            "flexWrap": "wrap",
+                            "marginBottom": "14px",
+                        },
+                        children=[
+                            html.Div([
+                                html.Div("Bridge Port", style=_LABEL_STYLE),
+                                dcc.Input(
+                                    id="bridge-port-input",
+                                    type="number",
+                                    value=BRIDGE_DEFAULT_PORT,
+                                    style={**_INPUT_STYLE, "width": "90px"},
+                                ),
+                            ]),
+                            html.Div([
+                                html.Div("\u00a0", style=_LABEL_STYLE),
+                                html.A(
+                                    html.Button(
+                                        "Download Bridge",
+                                        id="bridge-download-btn",
+                                        n_clicks=0,
+                                        style={
+                                            **_BTN_BASE,
+                                            "padding": "8px 18px",
+                                            "backgroundColor": COLORS["btn_primary"],
+                                            "color": "white",
+                                        },
+                                    ),
+                                    href="/download/bloomberg_bridge.py",
+                                ),
+                            ]),
+                            html.Div([
+                                html.Div("\u00a0", style=_LABEL_STYLE),
+                                html.Button(
+                                    "Test Connection",
+                                    id="bridge-test-btn",
+                                    n_clicks=0,
+                                    style={
+                                        **_BTN_BASE,
+                                        "padding": "8px 18px",
+                                        "backgroundColor": COLORS["btn_neutral"],
+                                        "color": COLORS["text_muted"],
+                                        "border": f"1px solid {COLORS['btn_neutral_border']}",
+                                    },
+                                ),
+                            ]),
+                            html.Div(
+                                id="bridge-test-result",
+                                style={
+                                    "fontFamily": _FONT_MONO,
+                                    "fontSize": "12px",
+                                    "color": COLORS["text_muted"],
+                                    "alignSelf": "center",
+                                },
+                            ),
+                        ],
+                    ),
+                    # Instructions
+                    html.Div(
+                        style={
+                            "fontSize": "12px",
+                            "color": COLORS["text_hint"],
+                            "fontFamily": _FONT_SANS,
+                            "lineHeight": "1.8",
+                        },
+                        children=[
+                            "1. Download ",
+                            html.Span("bloomberg_bridge.py", style={
+                                "color": COLORS["text_accent"],
+                                "fontFamily": _FONT_MONO,
+                            }),
+                            " to your Bloomberg desktop",
+                            html.Br(),
+                            "2. Run: ",
+                            html.Span(
+                                id="bridge-cmd-display",
+                                children=f"python bloomberg_bridge.py --port {BRIDGE_DEFAULT_PORT}",
+                                style=_cmd_style,
+                            ),
+                            html.Br(),
+                            "3. Dashboard connects automatically",
+                        ],
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+def create_bridge_banner():
+    """Warning banner shown when bridge is disconnected."""
+    return html.Div(
+        id="bridge-banner",
+        style={"display": "none"},
+        children=[
+            html.Div(
+                style={
+                    "backgroundColor": "rgba(251, 146, 60, 0.1)",
+                    "border": f"1px solid {COLORS['offer_col']}",
+                    "borderRadius": "8px",
+                    "padding": "10px 16px",
+                    "marginBottom": "14px",
+                    "display": "flex",
+                    "alignItems": "center",
+                    "justifyContent": "space-between",
+                    "fontFamily": _FONT_MONO,
+                    "fontSize": "13px",
+                },
+                children=[
+                    html.Span(
+                        "Bloomberg Bridge not running — using mock data",
+                        style={"color": COLORS["offer_col"]},
+                    ),
+                    html.A(
+                        html.Button(
+                            "Download Bridge",
+                            id="banner-download-btn",
+                            n_clicks=0,
+                            style={
+                                **_BTN_BASE,
+                                "padding": "5px 14px",
+                                "fontSize": "12px",
+                                "backgroundColor": COLORS["btn_primary"],
+                                "color": "white",
+                            },
+                        ),
+                        href="/download/bloomberg_bridge.py",
                     ),
                 ],
             ),
@@ -1199,9 +1396,19 @@ def create_layout():
             dcc.Store(id="current-user", storage_type="session", data=""),
             dcc.Store(id="ws-blotter-refresh", data=0),
             dcc.Store(id="ws-online-count", data=0),
+            # Bloomberg Bridge stores
+            dcc.Store(id="bridge-port", storage_type="local", data=BRIDGE_DEFAULT_PORT),
+            dcc.Store(id="bridge-status", data="disconnected"),
+            dcc.Store(id="market-data-request", data=None),
+            dcc.Store(id="market-data-response", data=None),
+            dcc.Store(id="market-data-source", data="fallback"),
+            dcc.Store(id="fetch-trigger", data=0),
+            dcc.Store(id="pricing-context", data=None),
             # Fallback polling interval for blotter sync (every 5s)
             dcc.Interval(id="blotter-poll", interval=5000, n_intervals=0),
             create_header(),
+            # Bloomberg settings panel (collapsible, below header)
+            create_bbg_settings_panel(),
             # Subtle divider
             html.Div(
                 style={
@@ -1210,6 +1417,8 @@ def create_layout():
                     "margin": "0 0 20px 0",
                 },
             ),
+            # Bridge disconnected banner
+            create_bridge_banner(),
             create_order_input(),
             # Toolbar + table grouped as one card
             html.Div(

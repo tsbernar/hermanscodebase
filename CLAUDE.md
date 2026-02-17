@@ -11,7 +11,8 @@ The core use case: broker sends an order like `AAPL Jun26 240/220 PS 1X2 vs250 1
 - **NumPy / SciPy** — numerical pricing
 - **blpapi 3.25.12** — Bloomberg Terminal API (installed; falls back to mock when Terminal not running)
 - **Flask-SocketIO** — WebSocket server for multi-user live blotter sync
-- **pytest** — 106 tests, all passing
+- **flask-cors** — CORS support for Bloomberg Bridge
+- **pytest** — 118 tests, all passing
 
 ## Project Structure
 ```
@@ -21,17 +22,20 @@ src/options_pricer/
 ├── pricer.py            # Black-Scholes pricing engine + Greeks (delta, gamma, theta, vega, rho)
 ├── structure_pricer.py  # Calculates structure bid/offer/mid from individual leg screen prices
 ├── bloomberg.py         # BloombergClient (live) + MockBloombergClient (BS-based realistic quotes)
+├── bloomberg_bridge.py  # Local HTTP bridge server wrapping blpapi for browser access (port 8195)
+├── bridge_setup.py      # One-time setup for options-pricer:// custom protocol handler
 ├── order_store.py       # SQLite persistence for orders (~/.options_pricer/orders.db)
-├── settings.py          # Canonical config (Bloomberg, dashboard, multi-user settings)
+├── settings.py          # Canonical config (Bloomberg, dashboard, multi-user, bridge settings)
 └── dashboard/
-    ├── app.py           # Dash web app + Flask-SocketIO (pricer, blotter, multi-user callbacks)
-    └── layouts.py       # UI layout: username modal, pricer toolbar+table, order blotter
+    ├── app.py           # Dash web app + Flask-SocketIO (3-phase bridge pricing, blotter, multi-user)
+    └── layouts.py       # UI layout: username modal, pricer toolbar+table, order blotter, BBG settings
 tests/
 ├── test_models.py       # 17 tests — payoffs, structures
 ├── test_parser.py       # 43 tests — extraction helpers + full order parsing for all IDB formats
 ├── test_order_store.py  # 12 tests — SQLite persistence (load, save, add, update, created_by)
 ├── test_pricer.py       # 23 tests — BS pricing, put-call parity, Greeks, structure pricing
-└── test_structure_pricer.py # 11 tests — structure bid/offer/mid, sizes, ratio spreads
+├── test_structure_pricer.py # 11 tests — structure bid/offer/mid, sizes, ratio spreads
+└── test_bloomberg_bridge.py # 12 tests — bridge HTTP endpoints (status, spot, quotes, multiplier)
 ```
 
 ## Broker Shorthand Format
@@ -79,8 +83,11 @@ AAPL Jun26 240/220 PS 1X2 vs250 15d 500x @ 3.50 1X over
 ## Key Commands
 ```bash
 source .venv/Scripts/activate          # Windows (Git Bash)
-pytest tests/ -v                       # Run all 94 tests
+pytest tests/ -v                       # Run all 118 tests
 python -m options_pricer.dashboard.app # Launch dashboard at http://127.0.0.1:8050
+python -m options_pricer.bloomberg_bridge --mock  # Launch bridge in mock mode on port 8195
+python -m options_pricer.bloomberg_bridge          # Launch bridge with live Bloomberg
+python -m options_pricer.bridge_setup install       # Register options-pricer:// protocol handler
 ```
 
 ## UI Rules (MUST follow when editing layouts.py or any dashboard styling)
@@ -93,9 +100,30 @@ python -m options_pricer.dashboard.app # Launch dashboard at http://127.0.0.1:80
 - **Test visually:** After any layout change, confirm in the browser that all text, inputs, buttons, and table columns are fully visible and not clipped. Scroll horizontally if the table is wide (`overflowX: auto` on DataTable).
 - **Consistent sizing:** Use monospace font at 13px for data cells, 16px for the order input. Keep padding consistent (8-14px for inputs, 10-14px for table cells).
 
+## Bloomberg Bridge Architecture
+Bloomberg Terminal API (`blpapi`) speaks a proprietary binary protocol on port 8194. Browsers cannot open raw TCP sockets. The solution: a local HTTP bridge runs on the user's desktop alongside Bloomberg Terminal.
+
+```
+Bloomberg Terminal (user desktop, port 8194)
+    ↓ blpapi (binary)
+Bloomberg Bridge (user desktop, port 8195, HTTP)
+    ↓ fetch() from browser JS
+Dash Server (central) — parsing, structure pricing, order storage
+```
+
+### 3-Phase Pricing Pipeline
+1. **Phase 1 (server):** Parse order text → serialize to `pricing-context` + `market-data-request` stores → increment `fetch-trigger`
+2. **Phase 2 (clientside JS):** `fetch()` to bridge at `http://127.0.0.1:<port>/api/option_quotes` → write response to `market-data-response`. Falls back to `{_fallback: true}` if bridge unreachable.
+3. **Phase 3 (server):** Read `pricing-context` + `market-data-response` → if fallback, use server-side `MockBloombergClient` → price structure → update all display outputs.
+
+### Bridge Status
+- Green dot = live Bloomberg, amber = mock mode, red = disconnected
+- Click BBG indicator to open settings panel (port config, test connection, launch bridge)
+- `options-pricer://launch` protocol handler auto-starts bridge (requires one-time `bridge_setup install`)
+
 ## Current Status & Next Steps
 - Parser handles all example formats provided so far (including `Nk` quantity format) — feed more real orders to refine
-- Bloomberg API integrated but needs Terminal running for live data; mock works for dev
+- Bloomberg Bridge architecture: local HTTP bridge + 3-phase pricing pipeline with automatic fallback to mock
 - Order Blotter with SQLite persistence, editable cells, column toggle, PnL auto-calc, and recall working
 - Multi-user support: username prompt, shared blotter with "User" column, WebSocket live sync (up to 15 users)
 - Settings module (`src/options_pricer/settings.py`) centralizes all config constants
